@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Husqvarna to MQTT - ESP32 Flasher</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 500px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .status-box {
+            background: #f5f5f5;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin-bottom: 25px;
+            border-radius: 4px;
+            font-size: 14px;
+            color: #555;
+        }
+
+        .status-box.connected {
+            border-left-color: #10b981;
+            background: #ecfdf5;
+            color: #065f46;
+        }
+
+        .status-box.error {
+            border-left-color: #ef4444;
+            background: #fef2f2;
+            color: #7f1d1d;
+        }
+
+        .button-group {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 25px;
+        }
+
+        .button-group.full {
+            grid-template-columns: 1fr;
+        }
+
+        button {
+            padding: 12px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-primary:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .btn-secondary:hover:not(:disabled) {
+            background: #e0e0e0;
+        }
+
+        .btn-secondary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .progress-container {
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: #e5e5e5;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            font-size: 12px;
+            color: #666;
+            margin-top: 8px;
+            text-align: center;
+        }
+
+        .log {
+            background: #1e1e1e;
+            color: #0f0;
+            padding: 12px;
+            border-radius: 6px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+            margin-top: 20px;
+            display: none;
+            line-height: 1.4;
+        }
+
+        .log.active {
+            display: block;
+        }
+
+        .log-line {
+            margin: 2px 0;
+        }
+
+        .port-select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            margin-bottom: 15px;
+        }
+
+        .info {
+            background: #eff6ff;
+            border-left: 4px solid #3b82f6;
+            padding: 12px;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #1e40af;
+            margin-bottom: 20px;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid #667eea;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Husqvarna MQTT</h1>
+        <p class="subtitle">ESP32 Firmware Flasher</p>
+
+        <div class="info">
+            Make sure your ESP32 is connected via USB and powered on.
+        </div>
+
+        <div class="status-box" id="status">
+            Ready to connect. Press the button below to begin.
+        </div>
+
+        <div id="portContainer" style="display: none;">
+            <label for="portSelect" style="display: block; margin-bottom: 8px; font-size: 13px; color: #666; font-weight: 500;">
+                Select COM Port:
+            </label>
+            <select id="portSelect" class="port-select"></select>
+        </div>
+
+        <div class="button-group">
+            <button id="btnConnect" class="btn-primary" onclick="connectSerial()">
+                Connect
+            </button>
+            <button id="btnDisconnect" class="btn-secondary" onclick="disconnectSerial()" disabled>
+                Disconnect
+            </button>
+        </div>
+
+        <button id="btnFlash" class="btn-primary button-group full" onclick="flashFirmware()" disabled>
+            ⚡ Flash Firmware
+        </button>
+
+        <div class="progress-container" id="progressContainer">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="progress-text" id="progressText">0%</div>
+        </div>
+
+        <div class="log" id="log"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/esptool-js@0.8.2/bundle.js"></script>
+    <script>
+        const { ESPLoader, Transport } = window;
+
+        let transport = null;
+        let port = null;
+        let isFlashing = false;
+
+        // Firmware files (relative to GitHub Pages root)
+        const FIRMWARE_FILES = [
+            { path: 'bootloader.bin', offset: 0x1000 },
+            { path: 'partitions.bin', offset: 0x8000 },
+            { path: 'firmware.bin', offset: 0x10000 }
+        ];
+
+        function updateStatus(message, type = 'info') {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = `status-box ${type === 'connected' ? 'connected' : type === 'error' ? 'error' : ''}`;
+        }
+
+        function log(message) {
+            const logEl = document.getElementById('log');
+            if (!logEl.classList.contains('active')) {
+                logEl.classList.add('active');
+            }
+            const line = document.createElement('div');
+            line.className = 'log-line';
+            line.textContent = message;
+            logEl.appendChild(line);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function updateProgress(percent, message) {
+            document.getElementById('progressContainer').style.display = 'block';
+            document.getElementById('progressFill').style.width = percent + '%';
+            document.getElementById('progressText').textContent = message;
+        }
+
+        async function connectSerial() {
+            try {
+                if (!('serial' in navigator)) {
+                    updateStatus('Web Serial API not supported in this browser. Use Chrome, Edge, or Brave.', 'error');
+                    return;
+                }
+
+                // Get available ports
+                const ports = await navigator.serial.getPorts();
+                const portSelect = document.getElementById('portSelect');
+                const portContainer = document.getElementById('portContainer');
+
+                if (ports.length > 0) {
+                    // Auto-connect to first port if available
+                    port = ports[0];
+                    await openPort(port);
+                } else {
+                    // Show port selector
+                    portContainer.style.display = 'block';
+                    portSelect.innerHTML = '<option>Select a port...</option>';
+
+                    // Request a port
+                    port = await navigator.serial.requestPort();
+                    await openPort(port);
+                }
+            } catch (error) {
+                if (error.name === 'NotFoundError') {
+                    updateStatus('No port selected. Please select a port.', 'error');
+                } else {
+                    updateStatus(`Connection error: ${error.message}`, 'error');
+                    log(`Error: ${error.message}`);
+                }
+            }
+        }
+
+        async function openPort(selectedPort) {
+            try {
+                await selectedPort.open({ baudRate: 115200 });
+                transport = new Transport(selectedPort);
+
+                log('Connected to ESP32');
+                updateStatus('✓ Connected to ESP32', 'connected');
+
+                document.getElementById('btnConnect').disabled = true;
+                document.getElementById('btnDisconnect').disabled = false;
+                document.getElementById('btnFlash').disabled = false;
+                document.getElementById('portContainer').style.display = 'none';
+            } catch (error) {
+                updateStatus(`Failed to open port: ${error.message}`, 'error');
+                log(`Error: ${error.message}`);
+            }
+        }
+
+        async function disconnectSerial() {
+            try {
+                if (transport) {
+                    await transport.close();
+                    transport = null;
+                }
+
+                updateStatus('Disconnected', 'info');
+                document.getElementById('btnConnect').disabled = false;
+                document.getElementById('btnDisconnect').disabled = true;
+                document.getElementById('btnFlash').disabled = true;
+                document.getElementById('progressContainer').style.display = 'none';
+                log('Disconnected');
+            } catch (error) {
+                updateStatus(`Disconnect error: ${error.message}`, 'error');
+            }
+        }
+
+        async function flashFirmware() {
+            if (isFlashing || !transport) {
+                return;
+            }
+
+            isFlashing = true;
+            document.getElementById('btnFlash').disabled = true;
+            document.getElementById('btnConnect').disabled = true;
+            document.getElementById('btnDisconnect').disabled = true;
+
+            try {
+                updateProgress(0, 'Initializing...');
+                log('Starting flash process...');
+
+                const loader = new ESPLoader({ transport, logger: log });
+
+                updateProgress(10, 'Connecting to bootloader...');
+                await loader.connect();
+                log(`Chip: ${loader.getChipName()}`);
+                log(`MAC: ${Array.from(loader.read_mac()).map(x => x.toString(16).padStart(2, '0')).join(':')}`);
+
+                updateProgress(20, 'Reading flash info...');
+
+                // Fetch all firmware files
+                const fileData = [];
+                for (let i = 0; i < FIRMWARE_FILES.length; i++) {
+                    const file = FIRMWARE_FILES[i];
+                    log(`Fetching ${file.path}...`);
+                    const response = await fetch(file.path);
+                    if (!response.ok) throw new Error(`Failed to fetch ${file.path}`);
+                    const data = await response.arrayBuffer();
+                    fileData.push({ data: new Uint8Array(data), offset: file.offset });
+                    updateProgress(20 + (i * 10), `Downloaded ${file.path}`);
+                }
+
+                // Erase flash
+                updateProgress(50, 'Erasing flash...');
+                log('Erasing flash sectors...');
+                await loader.erase_flash();
+
+                // Write files
+                for (let i = 0; i < fileData.length; i++) {
+                    const { data, offset } = fileData[i];
+                    const fileName = FIRMWARE_FILES[i].path;
+                    updateProgress(60 + (i * 13), `Writing ${fileName}...`);
+                    log(`Writing ${fileName} at offset 0x${offset.toString(16).padStart(4, '0')}`);
+
+                    await loader.write_flash({
+                        fileArray: [{ data, offset }],
+                        flashMode: 0,
+                        flashFreq: 40,
+                        flashSize: 'keep'
+                    });
+                }
+
+                updateProgress(99, 'Finalizing...');
+                log('Flash complete!');
+
+                // Reset device
+                await loader.hard_reset();
+                await new Promise(r => setTimeout(r, 1000));
+
+                updateProgress(100, 'Done!');
+                updateStatus('✓ Firmware flashed successfully! Device is rebooting...', 'connected');
+                log('Device rebooting. You can now configure it via WiFi.');
+
+            } catch (error) {
+                updateStatus(`Flash failed: ${error.message}`, 'error');
+                log(`ERROR: ${error.message}`);
+                log(error.stack);
+            } finally {
+                isFlashing = false;
+                document.getElementById('btnFlash').disabled = false;
+                document.getElementById('btnConnect').disabled = false;
+                document.getElementById('btnDisconnect').disabled = false;
+            }
+        }
+
+        // Check for Web Serial API support on load
+        window.addEventListener('load', () => {
+            if (!('serial' in navigator)) {
+                updateStatus('Web Serial API not supported. Use Chrome, Edge, or Brave.', 'error');
+                document.getElementById('btnConnect').disabled = true;
+            }
+        });
+    </script>
+</body>
+</html>

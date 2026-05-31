@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Flymo Bridge — Setup</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  section { border: 1px solid #333; border-radius:4px; padding:1rem; margin:1.5rem 0; }
+  h2 { margin-top:0; color:var(--fg); font-size:1rem; text-transform:uppercase; letter-spacing:.05em; }
+  label { display:block; margin-bottom:.8rem; }
+  label span { display:block; font-size:.8rem; opacity:.7; margin-bottom:.2rem; }
+  input[type=text], input[type=password] { width:100%; max-width:24rem; }
+  #wifi-msg, #admin-msg { min-height:1.2em; }
+</style>
+</head>
+<body>
+<h1>Flymo Bridge</h1>
+<nav><a href="/debug">Debug</a> <a href="/update">Update</a> <a href="/pair">Pair</a></nav>
+
+<section>
+  <h2>WiFi</h2>
+  <form id="wifi-form">
+    <label><span>Network (SSID)</span>
+      <input type="text" name="ssid" autocomplete="off" required></label>
+    <label><span>Password</span>
+      <input type="password" name="psk" autocomplete="new-password"></label>
+    <p><input type="submit" value="Save &amp; restart"></p>
+    <p id="wifi-msg" class="placeholder"></p>
+  </form>
+</section>
+
+<section>
+  <h2>Admin credentials</h2>
+  <form id="admin-form">
+    <label><span>Username</span>
+      <input type="text" name="user" autocomplete="username"></label>
+    <label><span>New password</span>
+      <input type="password" name="new_pass" autocomplete="new-password" required></label>
+    <p><input type="submit" value="Update credentials"></p>
+    <p id="admin-msg" class="placeholder"></p>
+  </form>
+</section>
+
+<script>
+function post(url, data, msgEl) {
+  fetch(url, {method:'POST', body:new URLSearchParams(data)})
+    .then(r => r.json())
+    .then(j => {
+      if (j.error) { msgEl.textContent = 'Error: ' + j.error; return; }
+      if (j.ok && data.ssid !== undefined)
+        msgEl.textContent = 'Saved. Device restarting — connect to your WiFi network then visit flymo‑bridge.local';
+      else if (j.ok)
+        msgEl.textContent = 'Credentials updated.';
+    })
+    .catch(() => { msgEl.textContent = 'Request failed.'; });
+}
+
+document.getElementById('wifi-form').onsubmit = function(e) {
+  e.preventDefault();
+  var f = e.target, msg = document.getElementById('wifi-msg');
+  msg.textContent = 'Saving…';
+  post('/api/wifi', {ssid: f.ssid.value, psk: f.psk.value}, msg);
+};
+
+document.getElementById('admin-form').onsubmit = function(e) {
+  e.preventDefault();
+  var f = e.target, msg = document.getElementById('admin-msg');
+  msg.textContent = 'Saving…';
+  post('/api/admin', {user: f.user.value, new_pass: f.new_pass.value}, msg);
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Flymo Bridge</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  .tabs { display:flex; border-bottom:2px solid #333; margin-bottom:1.5rem; }
+  .tabs a {
+    padding:.5rem 1.2rem; color:var(--fg); text-decoration:none;
+    border:2px solid transparent; border-bottom:none;
+    margin-bottom:-2px; cursor:pointer;
+  }
+  .tabs a.active { border-color:#333; border-radius:4px 4px 0 0; color:var(--accent); }
+  .tab-pane { display:none; }
+  .tab-pane.active { display:block; }
+  section { border:1px solid #333; border-radius:4px; padding:1rem; margin-bottom:1.2rem; }
+  h2 { margin-top:0; font-size:.9rem; text-transform:uppercase; letter-spacing:.06em; opacity:.7; }
+  label { display:block; margin-bottom:.8rem; }
+  label span { display:block; font-size:.8rem; opacity:.6; margin-bottom:.2rem; }
+  input[type=text], input[type=password] { width:100%; max-width:22rem; }
+  .info-grid { display:grid; grid-template-columns:auto 1fr; gap:.3rem .8rem; font-size:.9rem; }
+  .info-grid dt { opacity:.6; }
+  .info-grid dd { margin:0; font-family:var(--mono); }
+  .msg { min-height:1.2em; font-size:.85rem; }
+  /* WiFi + BLE lists */
+  #scan-list, #ble-list { list-style:none; padding:0; margin:.8rem 0 0; max-width:28rem; }
+  #scan-list li, #ble-list li {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:.4rem .6rem; border:1px solid #333; border-radius:3px;
+    margin-bottom:.3rem; font-size:.9rem;
+  }
+  #scan-list li { cursor:pointer; }
+  #scan-list li:hover { border-color:var(--accent); }
+  .rssi { opacity:.5; font-size:.8rem; margin-left:.5rem; white-space:nowrap; }
+  .mower-badge { font-size:.75rem; color:var(--accent); margin-left:.4rem; }
+  /* OTA progress */
+  progress { width:100%; max-width:22rem; height:1rem; margin-top:.5rem; }
+  /* Debug log */
+  #log {
+    background:#111; border:1px solid #333; border-radius:3px;
+    padding:.6rem; font-size:.72rem; line-height:1.4;
+    max-height:460px; overflow-y:auto; white-space:pre-wrap; word-break:break-all;
+    margin:0;
+  }
+  .log-TRC { color:#555; }
+  .log-DBG { color:#888; }
+  .log-INF { color:#ccc; }
+  .log-WRN { color:#e8a000; }
+  .log-ERR { color:#e05050; }
+  .log-bar { display:flex; gap:.5rem; align-items:center; margin-bottom:.5rem; flex-wrap:wrap; }
+  .log-bar button { padding:.2rem .6rem; font-size:.8rem; }
+  #log-status { font-size:.8rem; opacity:.55; margin-left:auto; }
+</style>
+</head>
+<body>
+<h1>Flymo Bridge</h1>
+
+<nav class="tabs">
+  <a href="#status" class="tab-link">Status</a>
+  <a href="#mower"  class="tab-link">Mower</a>
+  <a href="#pair"   class="tab-link">Pair</a>
+  <a href="#setup"  class="tab-link">Setup</a>
+  <a href="#update" class="tab-link">Update</a>
+  <a href="#debug"  class="tab-link">Debug</a>
+</nav>
+
+<!-- STATUS TAB -->
+<div id="status" class="tab-pane">
+  <section>
+    <h2>System</h2>
+    <dl class="info-grid" id="info">
+      <dt>Firmware</dt><dd id="i-fw">—</dd>
+      <dt>Uptime</dt><dd id="i-up">—</dd>
+      <dt>Free heap</dt><dd id="i-heap">—</dd>
+      <dt>WiFi mode</dt><dd id="i-wifi">—</dd>
+      <dt>IP address</dt><dd id="i-ip">—</dd>
+    </dl>
+  </section>
+  <section>
+    <h2>Bluetooth Devices</h2>
+    <p>
+      <button id="ble-btn" onclick="triggerBle()">Scan now</button>
+      <span id="ble-status" style="font-size:.85rem;margin-left:.6rem;opacity:.7;"></span>
+    </p>
+    <ul id="ble-list"></ul>
+  </section>
+  <button onclick="loadInfo()">Refresh</button>
+  &nbsp;
+  <button onclick="doRestart()">Restart device</button>
+  &nbsp;
+  <button onclick="doFactoryReset()" style="color:#e05050;border-color:#e05050;">Factory reset</button>
+  <p id="restart-msg" class="msg placeholder"></p>
+</div>
+
+<!-- MOWER TAB -->
+<div id="mower" class="tab-pane">
+  <section>
+    <h2>Status</h2>
+    <dl class="info-grid">
+      <dt>Connection</dt><dd id="mw-conn">—</dd>
+      <dt>State</dt><dd id="mw-state">—</dd>
+      <dt>Activity</dt><dd id="mw-activity">—</dd>
+      <dt>Battery</dt><dd id="mw-battery">—</dd>
+      <dt>Detail</dt><dd id="mw-detail">—</dd>
+    </dl>
+  </section>
+  <section>
+    <h2>Controls</h2>
+    <div id="mower-wake-row">
+      <button onclick="doWake()" style="color:#000;">Wake up</button>
+      <span class="msg" id="mw-wake-msg" style="margin-left:.6rem;"></span>
+    </div>
+    <div id="mower-cmd-row" style="display:none">
+      <button onclick="doMowerCmd('mow')"   style="color:#000;border-color:#4a4;">Mow</button>
+      &nbsp;
+      <button onclick="doMowerCmd('park')"  style="color:#000;border-color:#e8a000;">Park</button>
+      &nbsp;
+      <button onclick="doMowerCmd('pause')" style="color:#000;border-color:#88a;">Pause</button>
+      <span class="msg" id="mw-cmd-msg" style="margin-left:.6rem;"></span>
+    </div>
+    <div style="margin-top:.6rem;">
+      <label for="mow-secs" style="font-size:.85rem;">Mow override duration (seconds):</label>
+      <input type="number" id="mow-secs" min="60" max="86400" style="width:7rem;">
+      <button onclick="saveMowSecs()" style="color:#000;">Save</button>
+      <span class="msg" id="mw-secs-msg" style="margin-left:.6rem;"></span>
+    </div>
+  </section>
+  <span style="font-size:.8rem;opacity:.5;" id="mw-auto-status">Auto-refreshing every 5 s</span>
+</div>
+
+<!-- PAIR TAB -->
+<div id="pair" class="tab-pane">
+  <section>
+    <h2>Mower connection</h2>
+    <dl class="info-grid" id="mower-info">
+      <dt>State</dt><dd id="m-state">—</dd>
+      <dt>Address</dt><dd id="m-addr">—</dd>
+      <dt>Name</dt><dd id="m-name">—</dd>
+      <dt>RSSI</dt><dd id="m-rssi">—</dd>
+      <dt>Detail</dt><dd id="m-detail">—</dd>
+    </dl>
+    <p style="margin-top:.8rem;">
+      <button onclick="loadMowerStatus()">Refresh</button>
+      &nbsp;
+      <button id="disc-btn" onclick="doDisconnect()" style="color:#e05050;border-color:#e05050;">Disconnect</button>
+    </p>
+  </section>
+  <section>
+    <h2>Pair / connect</h2>
+    <p style="font-size:.85rem;color:#e8a000;max-width:32rem;margin-bottom:.8rem;">
+      &#9888; The mower <strong>must be sitting in its charging station</strong> before pairing.
+    </p>
+    <div style="font-size:.85rem;opacity:.85;max-width:32rem;margin-bottom:1rem;line-height:1.6;">
+      <strong>How to prepare the mower for pairing:</strong>
+      <ol style="margin:.4rem 0 0 1.2rem;padding:0;">
+        <li>Place the mower in the charging station and confirm the charging LED is lit.</li>
+        <li>Close the Flymo / Husqvarna app on your phone — only one BLE connection is allowed at a time.</li>
+        <li>If the mower was previously paired to a phone, you may need to remove it from the phone's Bluetooth settings first.</li>
+        <li>Enter the <strong>operator PIN</strong> below (default <strong>1234</strong>).
+          If the mower was set up with the app, the PIN may have been changed — check the original installation paperwork or the app settings.</li>
+        <li>Click <strong>Save &amp; connect</strong>. The bridge will connect automatically within a few seconds.</li>
+      </ol>
+      <p style="margin:.6rem 0 0;opacity:.7;">
+        EasiLife GO 400 button reference (for PIN entry on the mower keypad if required):<br>
+        <strong>1</strong> = Power &nbsp;|&nbsp;
+        <strong>2</strong> = Play/Schedule &nbsp;|&nbsp;
+        <strong>3</strong> = Go (arrow) &nbsp;|&nbsp;
+        <strong>4</strong> = Home/Park
+      </p>
+    </div>
+    <form id="pair-form">
+      <label><span>MAC address (from BLE scan on Status tab)</span>
+        <input type="text" id="pair-mac" name="mac" placeholder="aa:bb:cc:dd:ee:ff"
+               pattern="([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}" autocomplete="off"></label>
+      <label><span>Operator PIN</span>
+        <input type="text" id="pair-pin" name="pin" value="1234"
+               pattern="[0-9]{1,6}" inputmode="numeric" style="max-width:8rem;"></label>
+      <p><input type="submit" value="Save &amp; connect"></p>
+      <p class="msg placeholder" id="pair-msg"></p>
+    </form>
+  </section>
+</div>
+
+<!-- SETUP TAB -->
+<div id="setup" class="tab-pane">
+  <section>
+    <h2>WiFi</h2>
+    <button id="scan-btn" onclick="startScan()">Scan for networks</button>
+    <p id="scan-msg" class="msg placeholder"></p>
+    <ul id="scan-list"></ul>
+    <form id="wifi-form">
+      <label><span>Network (SSID)</span>
+        <input type="text" id="wifi-ssid" name="ssid" autocomplete="off" required></label>
+      <label><span>Password <small id="wifi-pw-hint" style="opacity:.6"></small></span>
+        <input type="password" id="wifi-psk" name="psk" autocomplete="new-password"></label>
+      <p><input type="submit" value="Save &amp; restart"></p>
+      <p class="msg placeholder" id="wifi-msg"></p>
+    </form>
+  </section>
+  <section>
+    <h2>Admin credentials</h2>
+    <form id="admin-form">
+      <label><span>Username</span>
+        <input type="text" name="user" autocomplete="username"></label>
+      <label><span>New password</span>
+        <input type="password" name="new_pass" autocomplete="new-password" required></label>
+      <p><input type="submit" value="Update credentials"></p>
+      <p class="msg placeholder" id="admin-msg"></p>
+    </form>
+    <p style="font-size:.85rem;opacity:.7;margin:.6rem 0 .3rem;">
+      Password authentication for the web UI. Off by default. If you enable
+      it and get locked out, hold the BOOT button &gt;5 s to wipe settings.
+    </p>
+    <p>
+      <label style="display:inline">
+        <input type="checkbox" id="auth-toggle" onchange="toggleAuth()"
+               style="width:auto"> Require password to access the web UI
+      </label>
+      <span class="msg" id="auth-msg" style="margin-left:.6rem;"></span>
+    </p>
+  </section>
+  <section>
+    <h2>MQTT broker</h2>
+    <form id="mqtt-form">
+      <label><span>Host (blank = disabled)</span>
+        <input type="text" id="mqtt-host" name="host" autocomplete="off"></label>
+      <label><span>Port</span>
+        <input type="number" id="mqtt-port" name="port" min="1" max="65535" value="1883"></label>
+      <label><span>Username (optional)</span>
+        <input type="text" id="mqtt-user" name="user" autocomplete="off"></label>
+      <label><span>Password (optional, blank = keep)</span>
+        <input type="password" name="pass" autocomplete="new-password"></label>
+      <p><input type="submit" value="Save &amp; restart"></p>
+      <p class="msg placeholder" id="mqtt-msg"></p>
+    </form>
+  </section>
+</div>
+
+<!-- UPDATE TAB -->
+<div id="update" class="tab-pane">
+  <section>
+    <h2>Web Flashing Mode</h2>
+    <p id="maint-status" style="margin:.4rem 0;"></p>
+    <p style="font-size:.85rem;opacity:.7;margin:.2rem 0 .6rem;">
+      Enable this before uploading firmware from the browser. Bluetooth will be
+      disabled after reboot so the device can accept the OTA flash safely.
+      Re-enable it when you are finished.
+    </p>
+    <button id="maint-btn" onclick="toggleMaintenance()">…</button>
+    <span class="msg" id="maint-msg" style="margin-left:.6rem;"></span>
+  </section>
+  <section>
+    <h2>Firmware OTA</h2>
+    <p>Select the firmware binary and upload. The web UI is bundled into the
+       firmware — a single <code>firmware.bin</code> is the only file needed.</p>
+    <p style="font-size:.85rem;opacity:.7;margin:.2rem 0 .6rem;">
+      If you are flashing from the browser, enable Web Flashing Mode first,
+      then upload the firmware binary and allow the device to reboot.
+    </p>
+    <label><span>Firmware file (.bin)</span>
+      <input type="file" id="ota-file" accept=".bin"></label>
+    <p>
+      <button id="ota-btn" onclick="startOta()">Upload firmware</button>
+    </p>
+    <progress id="ota-progress" value="0" max="100" style="display:none"></progress>
+    <p id="ota-msg" class="msg placeholder"></p>
+  </section>
+</div>
+
+<!-- DEBUG TAB -->
+<div id="debug" class="tab-pane">
+  <section>
+    <h2>Live log</h2>
+    <div class="log-bar">
+      <button onclick="clearLog()">Clear</button>
+      <label style="margin:0;display:flex;align-items:center;gap:.3rem;font-size:.8rem;">
+        Min level:
+        <select id="log-level" onchange="renderLog()">
+          <option value="0">TRACE</option>
+          <option value="1">DEBUG</option>
+          <option value="2" selected>INFO</option>
+          <option value="3">WARN</option>
+          <option value="4">ERROR</option>
+        </select>
+      </label>
+      <span id="log-status">connecting…</span>
+    </div>
+    <pre id="log"></pre>
+  </section>
+</div>
+
+<script>
+// ---- Tab routing ----
+var _evtSource = null;
+
+function showTab(id) {
+  document.querySelectorAll('.tab-pane').forEach(function(p){ p.classList.remove('active'); });
+  document.querySelectorAll('.tab-link').forEach(function(a){ a.classList.remove('active'); });
+  var pane = document.getElementById(id);
+  if (pane) pane.classList.add('active');
+  var link = document.querySelector('.tab-link[href="#' + id + '"]');
+  if (link) link.classList.add('active');
+  if (id === 'status') { loadInfo(); loadBle(); startBleAutoRefresh(); }
+  else                 { stopBleAutoRefresh(); }
+  if (id === 'mower')  { startMowerAutoRefresh(); }
+  else                 { stopMowerAutoRefresh(); }
+  if (id === 'pair')   { loadMowerStatus(); }
+  if (id === 'update') { loadMaintenance(); }
+  if (id === 'setup')  { loadSetup(); }
+  if (id === 'debug' && !_evtSource) connectLog();
+}
+
+document.querySelectorAll('.tab-link').forEach(function(a) {
+  a.addEventListener('click', function(e) {
+    e.preventDefault();
+    var id = this.getAttribute('href').slice(1);
+    history.replaceState(null, '', '#' + id);
+    showTab(id);
+  });
+});
+
+var tab = location.hash.slice(1) || 'status';
+showTab(tab);
+
+// ---- Status: system info ----
+function loadInfo() {
+  fetch('/api/system/info')
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      document.getElementById('i-fw').textContent   = j.fw;
+      document.getElementById('i-up').textContent   = j.uptime_s + ' s';
+      document.getElementById('i-heap').textContent = (j.heap / 1024).toFixed(1) + ' KB';
+      document.getElementById('i-wifi').textContent = j.wifi;
+      document.getElementById('i-ip').textContent   = j.ip;
+    })
+    .catch(function(){ document.getElementById('i-fw').textContent = 'fetch failed'; });
+}
+
+function loadMaintenance() {
+  fetch('/api/system/maintenance')
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      var on = j.maintenance;
+      document.getElementById('maint-status').textContent = on
+        ? 'ACTIVE — Bluetooth is disabled.' : 'Off — Bluetooth running normally.';
+      document.getElementById('maint-status').style.color = on ? '#e05050' : '#4a4';
+      var btn = document.getElementById('maint-btn');
+      btn.textContent = on ? 'Disable maintenance mode' : 'Enable maintenance mode';
+      btn.style.color = on ? '' : '#e8a000';
+      btn.style.borderColor = on ? '' : '#e8a000';
+      btn._maintOn = on;
+    })
+    .catch(function(){});
+}
+
+function doRestart() {
+  var msg = document.getElementById('restart-msg');
+  msg.textContent = 'Restarting…';
+  fetch('/api/system/restart', {method:'POST'})
+    .then(function(){ msg.textContent = 'Done — page will reload in 5 s.'; setTimeout(function(){ location.reload(); }, 5000); })
+    .catch(function(){ msg.textContent = 'Failed.'; });
+}
+
+function doFactoryReset() {
+  if (!confirm('Factory reset will wipe all settings (WiFi, admin password, mower pairing) and reboot to setup mode.\n\nAre you sure?')) return;
+  var msg = document.getElementById('restart-msg');
+  msg.textContent = 'Resetting…';
+  fetch('/api/system/factory-reset', {method:'POST'})
+    .then(function(){ msg.textContent = 'Done — device wiped and rebooting. Connect to "FlymoBridge-setup" WiFi.'; })
+    .catch(function(){ msg.textContent = 'Failed.'; });
+}
+
+function toggleMaintenance() {
+  var btn = document.getElementById('maint-btn');
+  var msg = document.getElementById('maint-msg');
+  var enable = !btn._maintOn;
+  if (enable && !confirm('Enable maintenance mode?\n\nBluetooth will be disabled after reboot. Use this when OTA-flashing. Re-enable when done.')) return;
+  msg.textContent = 'Saving…';
+  var body = new FormData();
+  body.append('enable', enable ? '1' : '0');
+  fetch('/api/system/maintenance', {method:'POST', body: body})
+    .then(function(){ msg.textContent = 'Saved — rebooting…'; setTimeout(function(){ location.reload(); }, 5000); })
+    .catch(function(){ msg.textContent = 'Failed.'; });
+}
+
+// ---- Setup: prefill SSID, masked password, auth toggle ----
+function loadSetup() {
+  fetch('/api/system/info')
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      var ssid = document.getElementById('wifi-ssid');
+      if (ssid && !ssid.value) ssid.value = j.ssid || '';
+      var hint = document.getElementById('wifi-pw-hint');
+      var psk  = document.getElementById('wifi-psk');
+      if (j.wifi_pw_set) {
+        if (hint) hint.textContent = '(set — leave blank to keep)';
+        if (psk)  psk.placeholder = '••••••••';
+      } else {
+        if (hint) hint.textContent = '(none set)';
+      }
+      var at = document.getElementById('auth-toggle');
+      if (at) at.checked = !!j.auth;
+    })
+    .catch(function(){});
+}
+
+function toggleAuth() {
+  var at = document.getElementById('auth-toggle');
+  var msg = document.getElementById('auth-msg');
+  var on = at.checked;
+  if (on && !confirm('Require a password for the web UI?\n\nMake sure you know the admin username/password. If you get locked out, hold the BOOT button >5 s to wipe settings.')) {
+    at.checked = false; return;
+  }
+  msg.textContent = 'Saving…';
+  var body = new FormData();
+  body.append('enable', on ? '1' : '0');
+  fetch('/api/auth', {method:'POST', body: body})
+    .then(function(r){ if (!r.ok) throw 0; return r; })
+    .then(function(){ msg.textContent = on ? 'Auth ON — you may be prompted to log in.' : 'Auth OFF.'; })
+    .catch(function(){ msg.textContent = 'Failed.'; at.checked = !on; });
+}
+
+// ---- Status: BLE devices ----
+var _bleTimer = null;
+var _bleAutoTimer = null;
+var _userScan = false;   // true only between a user Scan click and its result
+
+function triggerBle() {
+  var btn = document.getElementById('ble-btn');
+  _userScan = true;
+  btn.disabled = true;
+  btn.textContent = 'Scanning…';
+  fetch('/api/ble/trigger', {method:'POST'})
+    .then(function(){ pollBle(); })
+    .catch(function(){ btn.disabled = false; btn.textContent = 'Scan now'; });
+}
+
+function loadBle() {
+  fetch('/api/ble/scan')
+    .then(function(r){ return r.json(); })
+    .then(renderBle)
+    .catch(function(){});
+}
+
+function pollBle() {
+  clearTimeout(_bleTimer);
+  fetch('/api/ble/scan')
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      renderBle(j);
+      if (j.scanning) {
+        _bleTimer = setTimeout(pollBle, 1500);
+      } else {
+        _userScan = false;
+        var btn = document.getElementById('ble-btn');
+        btn.disabled = false;
+        btn.textContent = 'Scan now';
+      }
+    })
+    .catch(function(){
+      _userScan = false;
+      var btn = document.getElementById('ble-btn');
+      btn.disabled = false;
+      btn.textContent = 'Scan now';
+    });
+}
+
+function startBleAutoRefresh() {
+  clearInterval(_bleAutoTimer);
+  _bleAutoTimer = setInterval(loadBle, 5000);
+}
+
+function stopBleAutoRefresh() {
+  clearInterval(_bleAutoTimer);
+  _bleAutoTimer = null;
+}
+
+function renderBle(j) {
+  var status = document.getElementById('ble-status');
+  if (j.scanning && _userScan) {
+    status.textContent = 'Scanning…';
+  } else if (j.devices && j.devices.length) {
+    status.textContent = j.devices.length + ' device(s) found.';
+  } else {
+    status.textContent = 'No devices found — make sure the mower is docked and powered on.';
+  }
+  if (!j.devices || !j.devices.length) return;
+  var list = document.getElementById('ble-list');
+  list.innerHTML = '';
+  j.devices.sort(function(a,b){ return b.rssi - a.rssi; });
+  j.devices.forEach(function(d) {
+    var li = document.createElement('li');
+    var label = d.name || d.addr;
+    var nameEl = document.createElement('span');
+    nameEl.textContent = label;
+    if (d.mower) {
+      var badge = document.createElement('span');
+      badge.className = 'mower-badge';
+      badge.textContent = ' ★ mower';
+      nameEl.appendChild(badge);
+    }
+    var meta = document.createElement('span');
+    meta.className = 'rssi';
+    meta.textContent = d.rssi + ' dBm';
+    if (d.name && d.name !== d.addr) li.title = d.addr;
+    if (d.mower) {
+      li.style.cursor = 'pointer';
+      li.title = 'Click to use on Pair tab — ' + d.addr;
+      li.addEventListener('click', function() {
+        document.getElementById('pair-mac').value = d.addr;
+        history.replaceState(null, '', '#pair');
+        showTab('pair');
+      });
+    }
+    li.appendChild(nameEl);
+    li.appendChild(meta);
+    list.appendChild(li);
+  });
+}
+
+// ---- Pair tab ----
+var _mowerPollTimer = null;
+
+function loadMowerStatus() {
+  fetch('/api/mower/status')
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      document.getElementById('m-state').textContent  = j.state  || '—';
+      document.getElementById('m-addr').textContent   = j.addr   || '—';
+      document.getElementById('m-name').textContent   = j.name   || '—';
+      document.getElementById('m-rssi').textContent   = j.rssi != null ? j.rssi + ' dBm' : '—';
+      document.getElementById('m-detail').textContent = j.detail || '—';
+      // Auto-fill MAC if empty
+      var macField = document.getElementById('pair-mac');
+      if (!macField.value && j.addr) macField.value = j.addr;
+    })
+    .catch(function(){});
+}
+
+function doDisconnect() {
+  fetch('/api/mower/disconnect', {method:'POST'})
+    .then(function(){ setTimeout(loadMowerStatus, 500); })
+    .catch(function(){});
+}
+
+document.getElementById('pair-form').onsubmit = function(e) {
+  e.preventDefault();
+  var msg = document.getElementById('pair-msg');
+  var mac = document.getElementById('pair-mac').value.trim();
+  var pin = document.getElementById('pair-pin').value.trim();
+  if (!mac) { msg.textContent = 'MAC address required.'; return; }
+  msg.textContent = 'Saving and connecting…';
+  fetch('/api/mower/pair', {method:'POST', body: new URLSearchParams({mac: mac, pin: pin})})
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      if (j.error) { msg.textContent = 'Error: ' + j.error; return; }
+      msg.textContent = 'Connecting… check the Debug tab for progress.';
+      clearTimeout(_mowerPollTimer);
+      (function poll() {
+        loadMowerStatus();
+        var state = document.getElementById('m-state').textContent;
+        if (state !== 'authenticated') _mowerPollTimer = setTimeout(poll, 2000);
+      })();
+    })
+    .catch(function(){ msg.textContent = 'Request failed.'; });
+};
+
+// ---- Setup: forms ----
+function postForm(url, data, msgEl, restart) {
+  fetch(url, {method:'POST', body:new URLSearchParams(data)})
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      if (j.error) { msgEl.textContent = 'Error: ' + j.error; return; }
+      msgEl.textContent = restart
+        ? 'Saved. Device restarting — connect to your WiFi then visit flymo-bridge.local'
+        : 'Saved.';
+    })
+    .catch(function(){ msgEl.textContent = 'Request failed.'; });
+}
+
+document.getElementById('wifi-form').onsubmit = function(e) {
+  e.preventDefault();
+  var f = e.target, msg = document.getElementById('wifi-msg');
+  msg.textContent = 'Saving…';
+  postForm('/api/wifi', {ssid: f.ssid.value, psk: f.psk.value}, msg, true);
+};
+
+document.getElementById('admin-form').onsubmit = function(e) {
+  e.preventDefault();
+  var f = e.target, msg = document.getElementById('admin-msg');
+  msg.textContent = 'Saving…';
+  postForm('/api/admin', {user: f.user.value, new_pass: f.new_pass.value}, msg, false);
+};
+
+document.getElementById('mqtt-form').onsubmit = function(e) {
+  e.preventDefault();
+  var f = e.target, msg = document.getElementById('mqtt-msg');
+  msg.textContent = 'Saving…';
+  postForm('/api/mqtt', {host: f.host.value, port: f.port.value,
+                         user: f.user.value, pass: f.pass.value}, msg, true);
+};
+
+function loadMqtt() {
+  fetch('/api/mqtt').then(function(r){ return r.json(); }).then(function(j){
+    if (j.host !== undefined) document.getElementById('mqtt-host').value = j.host;
+    if (j.port) document.getElementById('mqtt-port').value = j.port;
+    if (j.user !== undefined) document.getElementById('mqtt-user').value = j.user;
+  }).catch(function(){});
+}
+loadMqtt();
+
+// ---- Setup: WiFi scan ----
+var _scanTimer = null;
+
+function startScan() {
+  document.getElementById('scan-msg').textContent = 'Scanning…';
+  document.getElementById('scan-list').innerHTML = '';
+  document.getElementById('scan-btn').disabled = true;
+  pollScan();
+}
+
+function pollScan() {
+  fetch('/api/wifi/scan')
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      if (j.scanning) { _scanTimer = setTimeout(pollScan, 1500); return; }
+      document.getElementById('scan-btn').disabled = false;
+      document.getElementById('scan-msg').textContent = j.length ? '' : 'No networks found.';
+      var list = document.getElementById('scan-list');
+      list.innerHTML = '';
+      j.sort(function(a,b){ return b.rssi - a.rssi; });
+      j.forEach(function(net) {
+        var li = document.createElement('li');
+        li.title = 'Click to use this network';
+        var name = document.createTextNode(net.ssid);
+        var meta = document.createElement('span');
+        meta.className = 'rssi';
+        meta.textContent = net.rssi + ' dBm' + (net.secure ? ' 🔒' : '');
+        li.appendChild(name); li.appendChild(meta);
+        li.addEventListener('click', function() {
+          document.getElementById('wifi-ssid').value = net.ssid;
+          if (net.secure) {
+            var psk = document.querySelector('#wifi-form input[name=psk]');
+            if (psk) psk.focus();
+          }
+        });
+        list.appendChild(li);
+      });
+    })
+    .catch(function() {
+      document.getElementById('scan-btn').disabled = false;
+      document.getElementById('scan-msg').textContent = 'Scan failed.';
+    });
+}
+
+// ---- Update: OTA upload ----
+function startOta() {
+  var fileInput = document.getElementById('ota-file');
+  var msg       = document.getElementById('ota-msg');
+  var progress  = document.getElementById('ota-progress');
+  var btn       = document.getElementById('ota-btn');
+  if (!fileInput.files.length) { msg.textContent = 'Select a firmware .bin file first.'; return; }
+  var file = fileInput.files[0];
+  var form = new FormData();
+  form.append('firmware', file, file.name);
+  btn.disabled = true;
+  progress.style.display = 'block';
+  progress.value = 0;
+  msg.textContent = 'Uploading…';
+  var xhr = new XMLHttpRequest();
+  xhr.upload.addEventListener('progress', function(e) {
+    if (e.lengthComputable) progress.value = Math.round(e.loaded / e.total * 100);
+  });
+  xhr.addEventListener('load', function() {
+    btn.disabled = false;
+    try {
+      var j = JSON.parse(xhr.responseText);
+      if (j.ok) {
+        msg.textContent = 'Flash OK — device restarting. Page will reload in 10 s.';
+        setTimeout(function(){ location.reload(); }, 10000);
+      } else {
+        msg.textContent = 'Error: ' + (j.error || 'flash failed');
+      }
+    } catch(ex) {
+      msg.textContent = xhr.status === 200 ? 'Done.' : 'Upload failed (' + xhr.status + ')';
+    }
+  });
+  xhr.addEventListener('error', function() { btn.disabled = false; msg.textContent = 'Network error.'; });
+  xhr.open('POST', '/api/ota');
+  xhr.send(form);
+}
+
+// ---- Mower tab ----
+var _mowerAutoTimer = null;
+var MOWER_STATES     = ['Off','Wait for safety pin','Stopped','Fatal error',
+                        'Pending start','Paused','Mowing','Restricted','Error'];
+var MOWER_ACTIVITIES = ['None','Charging','Going out','Mowing',
+                        'Going home','Parked','Stopped in garden'];
+
+function loadMowerTab() {
+  fetch('/api/mower/status')
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      var isAuth = j.state === 'authenticated';
+      var connEl = document.getElementById('mw-conn');
+      connEl.textContent = j.state || '—';
+      connEl.style.color = isAuth ? 'var(--accent)' :
+                           (j.state === 'error' ? '#e05050' : '');
+      var ms = j.mower_state;
+      var ma = j.mower_activity;
+      var mb = j.mower_battery;
+      document.getElementById('mw-state').textContent    = ms !== null ? (MOWER_STATES[ms]     || ms)     : '—';
+      document.getElementById('mw-activity').textContent = ma !== null ? (MOWER_ACTIVITIES[ma] || ma)     : '—';
+      document.getElementById('mw-battery').textContent  = mb !== null ? mb + '%'                          : '—';
+      document.getElementById('mw-detail').textContent   = j.detail || '—';
+      document.getElementById('mower-wake-row').style.display = isAuth ? 'none' : '';
+      document.getElementById('mower-cmd-row').style.display  = isAuth ? ''     : 'none';
+    })
+    .catch(function(){});
+  var secsEl = document.getElementById('mow-secs');
+  if (secsEl && !secsEl.value) {
+    fetch('/api/mower/mow-secs')
+      .then(function(r){ return r.json(); })
+      .then(function(j){ if (j.secs) secsEl.value = j.secs; })
+      .catch(function(){});
+  }
+}
+
+function startMowerAutoRefresh() {
+  clearInterval(_mowerAutoTimer);
+  loadMowerTab();
+  _mowerAutoTimer = setInterval(loadMowerTab, 5000);
+}
+
+function stopMowerAutoRefresh() {
+  clearInterval(_mowerAutoTimer);
+  _mowerAutoTimer = null;
+}
+
+function doWake() {
+  var msg = document.getElementById('mw-wake-msg');
+  msg.textContent = 'Waking…';
+  fetch('/api/mower/wake', {method:'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      msg.textContent = j.ok ? 'Wake sent — connecting…' : 'Failed.';
+    })
+    .catch(function(){ msg.textContent = 'Failed.'; });
+}
+
+function saveMowSecs() {
+  var msg = document.getElementById('mw-secs-msg');
+  var v = document.getElementById('mow-secs').value;
+  msg.textContent = 'Saving…';
+  fetch('/api/mower/mow-secs', {method:'POST', body:new URLSearchParams({secs:v})})
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      msg.textContent = j.ok ? 'Saved.' : ('Error: ' + (j.error || '?'));
+    })
+    .catch(function(){ msg.textContent = 'Failed.'; });
+}
+
+function doMowerCmd(cmd) {
+  var msg = document.getElementById('mw-cmd-msg');
+  msg.textContent = 'Sending ' + cmd + '…';
+  fetch('/api/mower/command', {method:'POST', body:new URLSearchParams({cmd:cmd})})
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      msg.textContent = j.ok ? cmd + ' sent.' : ('Error: ' + (j.error || '?'));
+    })
+    .catch(function(){ msg.textContent = 'Failed.'; });
+}
+
+// ---- Debug: SSE log ----
+var _logEntries = []; // {id, ts, lv, src, msg}
+var LV = ['TRC','DBG','INF','WRN','ERR'];
+
+function connectLog() {
+  _evtSource = new EventSource('/api/debug/stream');
+  _evtSource.addEventListener('log', function(e) {
+    try {
+      var entry = JSON.parse(e.data);
+      _logEntries.push(entry);
+      if (_logEntries.length > 2000) _logEntries.splice(0, 500);
+      appendLogEntry(entry);
+    } catch(ex) {}
+  });
+  _evtSource.onopen = function() {
+    document.getElementById('log-status').textContent = 'connected';
+  };
+  _evtSource.onerror = function() {
+    document.getElementById('log-status').textContent = 'reconnecting…';
+  };
+}
+
+function appendLogEntry(entry) {
+  var minLv = parseInt(document.getElementById('log-level').value, 10);
+  var lvIdx = LV.indexOf(entry.lv);
+  if (lvIdx < minLv) return;
+  var pre = document.getElementById('log');
+  var line = document.createElement('span');
+  line.className = 'log-' + entry.lv;
+  line.textContent = '[' + entry.ts + '] ' + entry.lv + ' ' + entry.src + ': ' + entry.msg + '\n';
+  pre.appendChild(line);
+  // Trim to 500 visible lines
+  while (pre.childNodes.length > 500) pre.removeChild(pre.firstChild);
+  pre.scrollTop = pre.scrollHeight;
+}
+
+function renderLog() {
+  var pre = document.getElementById('log');
+  pre.innerHTML = '';
+  var minLv = parseInt(document.getElementById('log-level').value, 10);
+  _logEntries.forEach(function(entry) {
+    var lvIdx = LV.indexOf(entry.lv);
+    if (lvIdx < minLv) return;
+    var line = document.createElement('span');
+    line.className = 'log-' + entry.lv;
+    line.textContent = '[' + entry.ts + '] ' + entry.lv + ' ' + entry.src + ': ' + entry.msg + '\n';
+    pre.appendChild(line);
+  });
+  pre.scrollTop = pre.scrollHeight;
+}
+
+function clearLog() {
+  _logEntries = [];
+  document.getElementById('log').innerHTML = '';
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,40 @@
+# Build system and development environment
+.pio/
+.vscode/
+/.claude/
+*.code-workspace
+
+# PlatformIO and development config
+platformio.ini
+claude.md
+CLAUDE.md
+Claude_Plan.md
+
+# Development only
+CHANGELOG.md
+.github/
+.gitattributes
+webflasher.html
+decompile_*.py
+dex_search.py
+home-assistant.md
+protocol-notes.md
+upstream-*.py
+upstream-*.json
+
+# Build artifacts
+*.o
+*.a
+*.elf
+*.map
+*.dblite
+
+# OS
+.DS_Store
+Thumbs.db
+*.bak
+
+# Sensitive
+.env
+.env.local
+secrets.json
