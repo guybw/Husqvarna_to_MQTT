@@ -62,6 +62,23 @@ After flashing, the ESP32 broadcasts a WiFi access point:
 - Try PIN `1234` (default)
 - Power-cycle both devices
 
+## 🚧 Roadmap & Known Issues
+
+### High Priority
+- [ ] **Framework upgrade: Arduino → ESP-IDF** — Migrate from Arduino framework to native ESP-IDF for better stability, control, and performance
+- [ ] **Schedule support** — Add configurable daily start/stop times for automated mowing schedules
+- [ ] **Boot reliability** — Investigate and fix intermittent "won't start after flash" issue (currently requires power-cycle in rare cases)
+
+### Medium Priority
+- [ ] **Battery temperature sensor** — Add `GetBatteryTemperature` command (command ID needs to be recovered from APK decompile)
+- [ ] **Statistics tracking** — Publish run time, cut time, and charge time via MQTT (GetAllStatistics command)
+- [ ] **Restriction reason mapping** — Display human-readable restriction reasons instead of raw codes
+
+### Nice to Have
+- [ ] Multi-mower support (currently single mower only)
+- [ ] Advanced scheduling (weather-based, grass length-based)
+- [ ] Home Assistant automation templates
+
 ---
 
 **Version:** 0.12.4-dev | **License:** GPL-3.0-or-later | [Source Code](https://github.com/guybw/Husqvarna_to_MQTT)
