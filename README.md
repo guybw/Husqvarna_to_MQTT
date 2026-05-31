@@ -70,12 +70,12 @@ After flashing, the ESP32 broadcasts a WiFi access point:
 - [ ] **Boot reliability** — Investigate and fix intermittent "won't start after flash" issue (currently requires power-cycle in rare cases)
 
 ### Medium Priority
-- [ ] **Battery temperature sensor** — `GetBatteryTemperature` command not supported on Flymo EasiLife GO 400 (may be available on other mower models)
+- [ ] **HA Diagnostics reorganization** — Move A-loop signals, pitch/roll/collision, and voltage sensors to Home Assistant's Diagnostics category (cleaner main dashboard)
 
 ### Nice to Have
-- [ ] Advanced scheduling (weather-based, grass length-based)
-- [ ] Home Assistant automation templates
-- [ ] Enhanced logging and diagnostics
+- [ ] Advanced scheduling (weather-based, grass-height-based)
+- [ ] Home Assistant automation templates and scripts
+- [ ] Enhanced logging and remote diagnostics
 
 ---
 
