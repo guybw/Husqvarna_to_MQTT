@@ -70,14 +70,12 @@ After flashing, the ESP32 broadcasts a WiFi access point:
 - [ ] **Boot reliability** — Investigate and fix intermittent "won't start after flash" issue (currently requires power-cycle in rare cases)
 
 ### Medium Priority
-- [ ] **Battery temperature sensor** — Add `GetBatteryTemperature` command (command ID needs to be recovered from APK decompile)
-- [ ] **Statistics tracking** — Publish run time, cut time, and charge time via MQTT (GetAllStatistics command)
-- [ ] **Restriction reason mapping** — Display human-readable restriction reasons instead of raw codes
+- [ ] **Battery temperature sensor** — `GetBatteryTemperature` command not supported on Flymo EasiLife GO 400 (may be available on other mower models)
 
 ### Nice to Have
-- [ ] Multi-mower support (currently single mower only)
 - [ ] Advanced scheduling (weather-based, grass length-based)
 - [ ] Home Assistant automation templates
+- [ ] Enhanced logging and diagnostics
 
 ---
 
