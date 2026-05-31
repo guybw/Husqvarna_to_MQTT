@@ -46,6 +46,47 @@ After flashing, the ESP32 broadcasts a WiFi access point:
 - **MQTT broker** (Mosquitto, Home Assistant, etc.)
 - **Husqvarna/Flymo mower** with Bluetooth
 
+## 🔐 How to Pair Your Mower
+
+### Step 1: Put Mower in Pairing Mode
+
+**Note:** Mower must be in the dock before pairing.
+
+1. **Turn off** the mower by holding the **Power** button
+2. **Turn it on** by pressing the **Power** button once
+3. **Enter the PIN** using the mower's buttons (see PIN code below)
+4. **Pairing mode is active** for 2–3 minutes
+
+### Step 2: Understanding PIN Codes
+
+Flymo mowers use button sequences to enter the PIN. The default PIN is **1234**, which translates to:
+
+| Button | Code |
+|--------|------|
+| **Power** (On/Off) | **1** |
+| **Go/Schedule** button | **2** |
+| **Go** button | **3** |
+| **Park** button | **4** |
+
+**Example:** To enter PIN `1234`:
+- Press Power button → releases (code 1)
+- Press Go/Schedule button → releases (code 2)
+- Press Go button → releases (code 3)
+- Press Park button → releases (code 4)
+
+**Note:** PIN mapping is specific to Flymo units. Other Husqvarna/Automower models may have different button layouts.
+
+### Step 3: Pair via Web UI
+
+1. Open the bridge's web UI at `http://192.168.4.1` (or your configured IP)
+2. Go to the **Bluetooth Devices** tab
+3. Click **Scan Now** to find your mower
+4. Once found, select your mower and enter the PIN (e.g., `1234`)
+5. Click **Pair**
+6. The bridge will authenticate and save the bond for future connections
+
+Bonding persists across reboots — you won't need to enter the PIN again unless the bond is explicitly cleared.
+
 ## 🐛 Troubleshooting
 
 **Can't connect to COM port?**
@@ -79,4 +120,16 @@ After flashing, the ESP32 broadcasts a WiFi access point:
 
 ---
 
-**Version:** 0.12.4-dev | **License:** GPL-3.0-or-later | [Source Code](https://github.com/guybw/Husqvarna_to_MQTT)
+## 📚 Credits & Attribution
+
+This project builds on the excellent reverse-engineering work of the open-source community:
+
+- **[alistair23/AutoMower-BLE](https://github.com/alistair23/AutoMower-BLE)** — Python BLE protocol implementation and reference
+- **[Marbanz/HusqvarnaAutoMower-BLE](https://github.com/Marbanz/HusqvarnaAutoMower-BLE)** — Extended protocol documentation and command reference
+- **[Husqvarna/Flymo](https://www.husqvarna.com/)** — Official mower hardware and firmware
+
+BLE protocol reverse-engineered from official Flymo app (v6.12.0) and live device testing.
+
+---
+
+**Version:** 0.12.4-dev | **License:** GPL-3.0-or-later | [GitHub](https://github.com/guybw/Husqvarna_to_MQTT)
