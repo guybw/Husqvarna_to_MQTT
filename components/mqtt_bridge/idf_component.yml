@@ -1,0 +1,7 @@
+## Managed-component dependencies for the `mqtt` component.
+## esp-mqtt was moved out of esp-idf core into the registry in IDF 6.x.
+## ArduinoJson pinned to v6.x (mqtt.cpp uses DynamicJsonDocument / containsKey).
+dependencies:
+  idf: ">=5.0"
+  espressif/mqtt: "^1.0.0"
+  bblanchon/ArduinoJson: "^6.21.5"

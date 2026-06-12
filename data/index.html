@@ -101,9 +101,10 @@
     <h2>Status</h2>
     <dl class="info-grid">
       <dt>Connection</dt><dd id="mw-conn">—</dd>
-      <dt>State</dt><dd id="mw-state">—</dd>
+      <dt>Status</dt><dd id="mw-state">—</dd>
       <dt>Activity</dt><dd id="mw-activity">—</dd>
       <dt>Battery</dt><dd id="mw-battery">—</dd>
+      <dt>Next start</dt><dd id="mw-next">—</dd>
       <dt>Detail</dt><dd id="mw-detail">—</dd>
     </dl>
   </section>
@@ -121,11 +122,54 @@
       <button onclick="doMowerCmd('pause')" style="color:#000;border-color:#88a;">Pause</button>
       <span class="msg" id="mw-cmd-msg" style="margin-left:.6rem;"></span>
     </div>
-    <div style="margin-top:.6rem;">
-      <label for="mow-secs" style="font-size:.85rem;">Mow override duration (seconds):</label>
-      <input type="number" id="mow-secs" min="60" max="86400" style="width:7rem;">
-      <button onclick="saveMowSecs()" style="color:#000;">Save</button>
-      <span class="msg" id="mw-secs-msg" style="margin-left:.6rem;"></span>
+  </section>
+  <section>
+    <h2>Bridge</h2>
+    <label for="recheck-min" style="font-size:.85rem;">Re-check interval when idle (minutes):</label>
+    <input type="number" id="recheck-min" min="0" max="1440" style="width:5rem;">
+    <button onclick="saveRecheck()" style="color:#000;">Save</button>
+    <span class="msg" id="recheck-msg" style="margin-left:.4rem;"></span>
+    <div style="font-size:.75rem;opacity:.6;margin-top:.2rem;max-width:34rem;">
+      How often the bridge wakes a sleeping/charging mower to read status &amp; battery
+      temperature (default 60; <strong>0 = never — manual wake only</strong>). It still
+      connects instantly on Wake or a command, and times mowing sessions from the mower's
+      own next start. Note: with 0, the bridge won't auto-notice an autonomous mow until
+      you Wake it.
+    </div>
+  </section>
+  <section id="mower-settings" style="display:none">
+    <h2>Settings</h2>
+    <p style="font-size:.8rem;opacity:.7;margin:-.3rem 0 .7rem;">Read from the mower while it's awake; a change is sent on the next poll.</p>
+    <div id="set-dp-row" style="display:none;margin-bottom:.8rem;">
+      <label for="set-dp" style="font-size:.85rem;">Drive past wire:</label>
+      <input type="number" id="set-dp" min="0" max="50" style="width:4.5rem;"> cm
+      <button onclick="saveDrivePast()" style="color:#000;">Save</button>
+      <span class="msg" id="set-dp-msg" style="margin-left:.4rem;"></span>
+      <div style="font-size:.75rem;opacity:.6;margin-top:.2rem;max-width:34rem;">
+        How far the front drives past the boundary wire before turning back
+        (default 32 cm). Lower = less edge over-mowing &amp; fewer perimeter collisions.</div>
+    </div>
+    <div id="set-col-row" style="display:none;">
+      <label for="set-col" style="font-size:.85rem;">Collision sensitivity:</label>
+      <select id="set-col" onchange="saveCollision()">
+        <option value="0">Low</option><option value="1">Medium</option><option value="2">High</option>
+      </select>
+      <span class="msg" id="set-col-msg" style="margin-left:.4rem;"></span>
+    </div>
+  </section>
+  <section id="mower-schedule" style="display:none">
+    <h2>Schedule</h2>
+    <p style="font-size:.8rem;opacity:.7;margin:-.3rem 0 .7rem;">Mowing tasks stored on the mower. Wake the mower, then Load.</p>
+    <button onclick="loadSchedule()" style="color:#000;">Load schedule</button>
+    <span class="msg" id="sched-msg" style="margin-left:.4rem;"></span>
+    <div id="sched-editor" style="display:none;margin-top:.8rem;">
+      <table id="sched-table" style="font-size:.8rem;border-collapse:collapse;"></table>
+      <div style="margin-top:.6rem;">
+        <button onclick="addSchedRow()" style="color:#000;">+ Add task</button>
+        <button onclick="saveSchedule()" style="color:#000;border-color:#4a4;margin-left:.4rem;">Save to mower</button>
+        <span class="msg" id="sched-save-msg" style="margin-left:.4rem;"></span>
+      </div>
+      <div style="font-size:.75rem;opacity:.6;margin-top:.4rem;">Max 16 tasks; duration up to 1092 min. Saving replaces the mower's whole schedule.</div>
     </div>
   </section>
   <span style="font-size:.8rem;opacity:.5;" id="mw-auto-status">Auto-refreshing every 5 s</span>
@@ -379,9 +423,8 @@ function toggleMaintenance() {
   var enable = !btn._maintOn;
   if (enable && !confirm('Enable maintenance mode?\n\nBluetooth will be disabled after reboot. Use this when OTA-flashing. Re-enable when done.')) return;
   msg.textContent = 'Saving…';
-  var body = new FormData();
-  body.append('enable', enable ? '1' : '0');
-  fetch('/api/system/maintenance', {method:'POST', body: body})
+  fetch('/api/system/maintenance', {method:'POST',
+                      body: new URLSearchParams({enable: enable ? '1' : '0'})})
     .then(function(){ msg.textContent = 'Saved — rebooting…'; setTimeout(function(){ location.reload(); }, 5000); })
     .catch(function(){ msg.textContent = 'Failed.'; });
 }
@@ -415,9 +458,8 @@ function toggleAuth() {
     at.checked = false; return;
   }
   msg.textContent = 'Saving…';
-  var body = new FormData();
-  body.append('enable', on ? '1' : '0');
-  fetch('/api/auth', {method:'POST', body: body})
+  fetch('/api/auth', {method:'POST',
+                      body: new URLSearchParams({enable: on ? '1' : '0'})})
     .then(function(r){ if (!r.ok) throw 0; return r; })
     .then(function(){ msg.textContent = on ? 'Auth ON — you may be prompted to log in.' : 'Auth OFF.'; })
     .catch(function(){ msg.textContent = 'Failed.'; at.checked = !on; });
@@ -611,6 +653,7 @@ function loadMqtt() {
   }).catch(function(){});
 }
 loadMqtt();
+loadRecheck();
 
 // ---- Setup: WiFi scan ----
 var _scanTimer = null;
@@ -715,18 +758,154 @@ function loadMowerTab() {
       document.getElementById('mw-state').textContent    = ms !== null ? (MOWER_STATES[ms]     || ms)     : '—';
       document.getElementById('mw-activity').textContent = ma !== null ? (MOWER_ACTIVITIES[ma] || ma)     : '—';
       document.getElementById('mw-battery').textContent  = mb !== null ? mb + '%'                          : '—';
+      document.getElementById('mw-next').textContent     = fmtNextStart(j.mower_next_start);
       document.getElementById('mw-detail').textContent   = j.detail || '—';
       document.getElementById('mower-wake-row').style.display = isAuth ? 'none' : '';
       document.getElementById('mower-cmd-row').style.display  = isAuth ? ''     : 'none';
+      document.getElementById('mower-settings').style.display = isAuth ? '' : 'none';
+      document.getElementById('mower-schedule').style.display = isAuth ? '' : 'none';
+      if (isAuth) {
+        var dpRow = document.getElementById('set-dp-row');
+        if (j.drive_past !== null && j.drive_past !== undefined) {
+          dpRow.style.display = '';
+          var dpIn = document.getElementById('set-dp');
+          if (document.activeElement !== dpIn) dpIn.value = j.drive_past;
+        } else { dpRow.style.display = 'none'; }
+        var colRow = document.getElementById('set-col-row');
+        if (j.collision_resp !== null && j.collision_resp !== undefined) {
+          colRow.style.display = '';
+          var colIn = document.getElementById('set-col');
+          if (document.activeElement !== colIn) colIn.value = String(j.collision_resp);
+        } else { colRow.style.display = 'none'; }
+      }
     })
     .catch(function(){});
-  var secsEl = document.getElementById('mow-secs');
-  if (secsEl && !secsEl.value) {
-    fetch('/api/mower/mow-secs')
-      .then(function(r){ return r.json(); })
-      .then(function(j){ if (j.secs) secsEl.value = j.secs; })
-      .catch(function(){});
+}
+
+function loadRecheck() {
+  fetch('/api/ble/recheck')
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      var el = document.getElementById('recheck-min');
+      if (j.min && document.activeElement !== el) el.value = j.min;
+    })
+    .catch(function(){});
+}
+
+function saveRecheck() {
+  var msg = document.getElementById('recheck-msg');
+  var v = document.getElementById('recheck-min').value;
+  msg.textContent = 'Saving…';
+  fetch('/api/ble/recheck', {method:'POST', body:new URLSearchParams({min:v})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){ msg.textContent = j.ok ? 'Saved.' : ('Error: '+(j.error||'?')); })
+    .catch(function(){ msg.textContent = 'Failed.'; });
+}
+
+function saveDrivePast() {
+  var msg = document.getElementById('set-dp-msg');
+  var v = document.getElementById('set-dp').value;
+  msg.textContent = 'Saving…';
+  fetch('/api/mower/command', {method:'POST',
+        body:new URLSearchParams({cmd:'drivepast', val:v})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){ msg.textContent = j.ok ? 'Sent.' : ('Error: '+(j.error||'?')); })
+    .catch(function(){ msg.textContent = 'Failed.'; });
+}
+
+function saveCollision() {
+  var msg = document.getElementById('set-col-msg');
+  var v = document.getElementById('set-col').value;
+  var cmd = v === '0' ? 'collision_low' : v === '1' ? 'collision_med' : 'collision_high';
+  msg.textContent = 'Saving…';
+  fetch('/api/mower/command', {method:'POST', body:new URLSearchParams({cmd:cmd})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){ msg.textContent = j.ok ? 'Sent.' : ('Error: '+(j.error||'?')); })
+    .catch(function(){ msg.textContent = 'Failed.'; });
+}
+
+// ---- Schedule editor ----
+var SC_DAYS  = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+var SC_NAMES = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+
+function schedRow(task) {
+  var start = task ? task.start : 32400;     // default 09:00
+  var dur   = task ? task.duration : 3600;   // default 60 min
+  var days  = (task && task.days) ? task.days : [];
+  var hh = String(Math.floor(start/3600)).padStart(2,'0');
+  var mm = String(Math.floor((start%3600)/60)).padStart(2,'0');
+  var tr = document.createElement('tr');
+  var html = '<td style="padding:.2rem .3rem;"><input type="time" class="sc-start" value="'+hh+':'+mm+'"></td>'
+           + '<td style="padding:.2rem .3rem;"><input type="number" class="sc-dur" min="1" max="1092" value="'+Math.round(dur/60)+'" style="width:4rem;"> min</td>';
+  for (var i=0;i<7;i++) {
+    var on = days.indexOf(SC_NAMES[i]) >= 0 ? 'checked' : '';
+    html += '<td style="padding:.2rem .2rem;text-align:center;"><label style="font-size:.7rem;display:block;opacity:.7;">'+SC_DAYS[i]+'</label>'
+         +  '<input type="checkbox" class="sc-day" data-day="'+i+'" '+on+'></td>';
   }
+  html += '<td style="padding:.2rem .3rem;"><button onclick="this.closest(\'tr\').remove()" style="color:#e05050;border-color:#e05050;">✕</button></td>';
+  tr.innerHTML = html;
+  return tr;
+}
+
+function renderSched(tasks) {
+  var tbl = document.getElementById('sched-table');
+  tbl.innerHTML = '';
+  (tasks || []).forEach(function(t){ tbl.appendChild(schedRow(t)); });
+  if (!tasks || tasks.length === 0) tbl.appendChild(schedRow(null));
+}
+
+function addSchedRow() { document.getElementById('sched-table').appendChild(schedRow(null)); }
+
+function loadSchedule() {
+  var msg = document.getElementById('sched-msg');
+  msg.textContent = 'Loading…';
+  fetch('/api/mower/schedule')
+    .then(function(r){ return r.json().then(function(j){ return {ok:r.ok, j:j}; }); })
+    .then(function(res){
+      if (!res.ok || res.j.error) { msg.textContent = 'Error: ' + (res.j.error || 'unavailable'); return; }
+      var n = res.j.tasks ? res.j.tasks.length : 0;
+      msg.textContent = n + ' task(s) loaded.';
+      renderSched(res.j.tasks);
+      document.getElementById('sched-editor').style.display = '';
+    })
+    .catch(function(){ msg.textContent = 'Failed.'; });
+}
+
+function saveSchedule() {
+  var msg = document.getElementById('sched-save-msg');
+  var rows = document.querySelectorAll('#sched-table tr');
+  var tasks = [];
+  for (var r=0;r<rows.length;r++) {
+    var row = rows[r];
+    var t = row.querySelector('.sc-start').value;
+    var durMin = parseInt(row.querySelector('.sc-dur').value, 10);
+    if (!t || !durMin) continue;
+    var p = t.split(':');
+    var start = parseInt(p[0],10)*3600 + parseInt(p[1],10)*60;
+    var dur = Math.min(durMin*60, 65535);
+    var days = [];
+    row.querySelectorAll('.sc-day').forEach(function(cb){
+      if (cb.checked) days.push(SC_NAMES[parseInt(cb.dataset.day,10)]);
+    });
+    if (days.length === 0) continue;
+    tasks.push({start:start, duration:dur, days:days});
+  }
+  if (tasks.length === 0) { msg.textContent = 'Add a task with at least one day.'; return; }
+  msg.textContent = 'Saving (waking mower if asleep, up to ~45s)…';
+  fetch('/api/mower/schedule', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({tasks:tasks})})
+    .then(function(r){ return r.json().then(function(j){ return {ok:r.ok, j:j}; }); })
+    .then(function(res){ msg.textContent = (res.ok && !res.j.error) ? 'Saved to mower.' : ('Error: ' + (res.j.error || '?')); })
+    .catch(function(){ msg.textContent = 'Failed.'; });
+}
+
+// Format the mower's next-start unix timestamp (its own clock) for display.
+function fmtNextStart(ts) {
+  if (ts === null || ts === undefined || ts <= 0) return '—';
+  var d = new Date(ts * 1000);
+  if (d.getFullYear() < 2020) return '—';   // mower clock not set
+  return d.toLocaleString([], {weekday:'short', day:'2-digit', month:'short',
+                               hour:'2-digit', minute:'2-digit'});
 }
 
 function startMowerAutoRefresh() {
@@ -747,18 +926,6 @@ function doWake() {
     .then(function(r){ return r.json(); })
     .then(function(j) {
       msg.textContent = j.ok ? 'Wake sent — connecting…' : 'Failed.';
-    })
-    .catch(function(){ msg.textContent = 'Failed.'; });
-}
-
-function saveMowSecs() {
-  var msg = document.getElementById('mw-secs-msg');
-  var v = document.getElementById('mow-secs').value;
-  msg.textContent = 'Saving…';
-  fetch('/api/mower/mow-secs', {method:'POST', body:new URLSearchParams({secs:v})})
-    .then(function(r){ return r.json(); })
-    .then(function(j) {
-      msg.textContent = j.ok ? 'Saved.' : ('Error: ' + (j.error || '?'));
     })
     .catch(function(){ msg.textContent = 'Failed.'; });
 }

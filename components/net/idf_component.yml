@@ -1,0 +1,5 @@
+## Managed-component dependencies for the `net` component.
+## mDNS moved out of esp-idf core into the component registry in IDF 5.x+.
+dependencies:
+  idf: ">=5.0"
+  espressif/mdns: "*"

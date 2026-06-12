@@ -1,0 +1,6 @@
+## Managed-component dependencies for the `web` component.
+## ArduinoJson is pinned to v6.x: web_server.cpp uses the v6 API
+## (DynamicJsonDocument, createNestedArray, containsKey) which v7 removed.
+dependencies:
+  idf: ">=5.0"
+  bblanchon/ArduinoJson: "^6.21.5"
