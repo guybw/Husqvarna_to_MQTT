@@ -1,6 +1,10 @@
 # Husqvarna to MQTT — ESP32 Bridge
 
-A Bluetooth bridge that connects your Husqvarna/Flymo mower to Home Assistant via MQTT.
+A Bluetooth bridge that connects your Husqvarna/Flymo robotic mower to Home Assistant via MQTT.
+
+Built on **native ESP-IDF** for the ESP32-WROOM-32. This repository ships the
+readable application source plus a ready-to-flash firmware binary — flash it in
+your browser and configure everything from the on-device web UI.
 
 ## ⚡ Flash Firmware
 
@@ -21,7 +25,7 @@ A Bluetooth bridge that connects your Husqvarna/Flymo mower to Home Assistant vi
 
 After flashing, the ESP32 broadcasts a WiFi access point:
 
-1. **Connect** to the AP (default: `Flymo-XXXXXX`)
+1. **Connect** to the AP (default: `FlymoBridge-setup`)
 2. **Open** `http://192.168.4.1` in your browser
 3. **Enter:**
    - WiFi SSID and password
@@ -37,7 +41,7 @@ After flashing, the ESP32 broadcasts a WiFi access point:
 - 🔐 Secure BLE pairing with bonding
 - 🌐 Web UI for configuration and debugging
 - ♻️ OTA firmware updates via web UI
-- ⚡ Energy-efficient (manual wake mode)
+- ⚡ Energy-efficient, sleep-respecting connection cadence
 
 ## 📋 What You'll Need
 
@@ -103,17 +107,26 @@ Bonding persists across reboots — you won't need to enter the PIN again unless
 - Try PIN `1234` (default)
 - Power-cycle both devices
 
+## 🗂️ Repository Layout
+
+| Path | Purpose |
+|------|---------|
+| `components/` | Application source (BLE, MQTT, web server, settings, protocol) |
+| `main/` | Firmware entry point |
+| `data/` | Web UI assets (single-page app) |
+| `tools/` | Helper scripts |
+| `docs/` | Browser flasher + the flashable firmware binaries |
+
+The prebuilt firmware lives in `docs/` and powers the one-click web flasher above.
+
 ## 🚧 Roadmap & Known Issues
 
-### High Priority
-- [ ] **Framework upgrade: Arduino → ESP-IDF** — Migrate from Arduino framework to native ESP-IDF for better stability, control, and performance
-- [ ] **Schedule support** — Add configurable daily start/stop times for automated mowing schedules
-- [ ] **Boot reliability** — Investigate and fix intermittent "won't start after flash" issue (currently requires power-cycle in rare cases)
-
-### Medium Priority
-- [ ] **HA Diagnostics reorganization** — Move A-loop signals, pitch/roll/collision, and voltage sensors to Home Assistant's Diagnostics category (cleaner main dashboard)
+### In Progress
+- [ ] **Schedule support** — write path and UI editor exist; not yet hardware-verified
+- [ ] **Boot reliability** — investigate intermittent "won't start after flash" (rare; power-cycle clears it)
 
 ### Nice to Have
+- [ ] HA Diagnostics reorganization (move secondary sensors to the Diagnostics category)
 - [ ] Advanced scheduling (weather-based, grass-height-based)
 - [ ] Home Assistant automation templates and scripts
 - [ ] Enhanced logging and remote diagnostics
@@ -122,14 +135,11 @@ Bonding persists across reboots — you won't need to enter the PIN again unless
 
 ## 📚 Credits & Attribution
 
-This project builds on the excellent reverse-engineering work of the open-source community:
+This project builds on the excellent work of the open-source community:
 
 - **[alistair23/AutoMower-BLE](https://github.com/alistair23/AutoMower-BLE)** — Python BLE protocol implementation and reference
 - **[Marbanz/HusqvarnaAutoMower-BLE](https://github.com/Marbanz/HusqvarnaAutoMower-BLE)** — Extended protocol documentation and command reference
-- **[Husqvarna/Flymo](https://www.husqvarna.com/)** — Official mower hardware and firmware
-
-BLE protocol reverse-engineered from official Flymo app (v6.12.0) and live device testing.
 
 ---
 
-**Version:** 0.12.4-dev | **License:** GPL-3.0-or-later | [GitHub](https://github.com/guybw/Husqvarna_to_MQTT)
+**Version:** 0.18.0-dev | **Framework:** native ESP-IDF | **License:** GPL-3.0-or-later | [GitHub](https://github.com/guybw/Husqvarna_to_MQTT)
