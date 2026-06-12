@@ -252,9 +252,11 @@
         let isFlashing = false;
 
         // Firmware files (relative to GitHub Pages root)
+        // ESP-IDF v6.2 layout — note ota_data at 0xe000 for the OTA partition scheme.
         const FIRMWARE_FILES = [
             { path: 'bootloader.bin', offset: 0x1000 },
             { path: 'partitions.bin', offset: 0x8000 },
+            { path: 'ota_data_initial.bin', offset: 0xe000 },
             { path: 'firmware.bin', offset: 0x10000 }
         ];
 

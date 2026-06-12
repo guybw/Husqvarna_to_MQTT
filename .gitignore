@@ -1,40 +1,60 @@
-# Build system and development environment
-.pio/
+# ── ESP-IDF build output ──────────────────────────────
+/build/
+/managed_components/
+sdkconfig
+sdkconfig.old
+
+# ── ESP-IDF build scaffolding (not published) ─────────
+/CMakeLists.txt
+/partitions.csv
+/sdkconfig.defaults
+/dependencies.lock
+
+# ── Editor / IDE / workspace ──────────────────────────
 .vscode/
-/.claude/
+.idea/
+.pio/
 *.code-workspace
-
-# PlatformIO and development config
-platformio.ini
-claude.md
-CLAUDE.md
-Claude_Plan.md
-
-# Development only
-CHANGELOG.md
 .github/
-.gitattributes
-webflasher.html
+
+# ── AI assistant / planning notes (not published) ─────
+.claude/
+CLAUDE.md
+claude.md
+Claude_Plan.md
+CHANGELOG.md
+
+# ── Research / reference material (not published) ─────
+/src/
+/reference/
+*.xapk
+*.apk
 decompile_*.py
 dex_search.py
-home-assistant.md
 protocol-notes.md
+home-assistant.md
 upstream-*.py
 upstream-*.json
 
-# Build artifacts
+# ── Legacy PlatformIO / old flasher ───────────────────
+platformio.ini
+webflasher.html
+manifest.json
+extra_script.py
+
+# ── Build artifacts ───────────────────────────────────
 *.o
 *.a
 *.elf
 *.map
 *.dblite
 
-# OS
+# ── OS / misc ─────────────────────────────────────────
 .DS_Store
 Thumbs.db
 *.bak
 
-# Sensitive
+# ── Secrets ───────────────────────────────────────────
 .env
 .env.local
 secrets.json
