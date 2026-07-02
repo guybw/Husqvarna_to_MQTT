@@ -164,15 +164,6 @@
             margin: 2px 0;
         }
 
-        .port-select {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            font-size: 14px;
-            margin-bottom: 15px;
-        }
-
         .info {
             background: #eff6ff;
             border-left: 4px solid #3b82f6;
@@ -213,23 +204,16 @@
             Ready to connect. Press the button below to begin.
         </div>
 
-        <div id="portContainer" style="display: none;">
-            <label for="portSelect" style="display: block; margin-bottom: 8px; font-size: 13px; color: #666; font-weight: 500;">
-                Select COM Port:
-            </label>
-            <select id="portSelect" class="port-select"></select>
-        </div>
-
         <div class="button-group">
-            <button id="btnConnect" class="btn-primary" onclick="connectSerial()">
+            <button id="btnConnect" class="btn-primary">
                 Connect
             </button>
-            <button id="btnDisconnect" class="btn-secondary" onclick="disconnectSerial()" disabled>
+            <button id="btnDisconnect" class="btn-secondary" disabled>
                 Disconnect
             </button>
         </div>
 
-        <button id="btnFlash" class="btn-primary button-group full" onclick="flashFirmware()" disabled>
+        <button id="btnFlash" class="btn-primary button-group full" disabled>
             ⚡ Flash Firmware
         </button>
 
@@ -243,22 +227,34 @@
         <div class="log" id="log"></div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/esptool-js@0.8.2/bundle.js"></script>
-    <script>
-        const { ESPLoader, Transport } = window;
+    <script type="module">
+        // esptool-js is shipped as an ES module (named exports), so it must be
+        // imported — it does NOT attach globals to window. Pin the version: an
+        // unpinned/non-existent tag 404s and leaves ESPLoader/Transport undefined.
+        import { ESPLoader, Transport } from "https://cdn.jsdelivr.net/npm/esptool-js@0.6.0/bundle.js";
 
-        let transport = null;
-        let port = null;
+        let transport = null;   // esptool-js Transport wrapping the Web Serial port
+        let device = null;      // the raw SerialPort chosen by the user
         let isFlashing = false;
 
-        // Firmware files (relative to GitHub Pages root)
-        // ESP-IDF v6.2 layout — note ota_data at 0xe000 for the OTA partition scheme.
+        // Flash-phase baud rate. main() first talks to the ROM at 115200 and then
+        // switches up to this. 460800 is reliable on the CH340/CP2102 USB-serial
+        // chips used on the Freenove ESP32-WROOM board (higher rates can be flaky).
+        const FLASH_BAUD = 460800;
+
+        // Firmware files (relative to the GitHub Pages root) and their flash offsets,
+        // taken from this project's partition table: bootloader 0x1000, partition
+        // table 0x8000, otadata 0xe000, app0 0x10000. esptool-js calls this "address".
         const FIRMWARE_FILES = [
-            { path: 'bootloader.bin', offset: 0x1000 },
-            { path: 'partitions.bin', offset: 0x8000 },
-            { path: 'ota_data_initial.bin', offset: 0xe000 },
-            { path: 'firmware.bin', offset: 0x10000 }
+            { path: 'bootloader.bin', address: 0x1000 },
+            { path: 'partitions.bin', address: 0x8000 },
+            { path: 'ota_data_initial.bin', address: 0xe000 },
+            { path: 'firmware.bin', address: 0x10000 }
         ];
+
+        const btnConnect = document.getElementById('btnConnect');
+        const btnDisconnect = document.getElementById('btnDisconnect');
+        const btnFlash = document.getElementById('btnFlash');
 
         function updateStatus(message, type = 'info') {
             const status = document.getElementById('status');
@@ -268,9 +264,7 @@
 
         function log(message) {
             const logEl = document.getElementById('log');
-            if (!logEl.classList.contains('active')) {
-                logEl.classList.add('active');
-            }
+            logEl.classList.add('active');
             const line = document.createElement('div');
             line.className = 'log-line';
             line.textContent = message;
@@ -284,34 +278,43 @@
             document.getElementById('progressText').textContent = message;
         }
 
+        // esptool-js writes diagnostics through an IEspLoaderTerminal; route them to
+        // the on-page log. writeLine = full line, write = partial (e.g. "...." dots).
+        const espTerminal = {
+            clean() { document.getElementById('log').innerHTML = ''; },
+            writeLine(data) { log(data); },
+            write(data) {
+                const logEl = document.getElementById('log');
+                logEl.classList.add('active');
+                let last = logEl.lastElementChild;
+                if (!last) { last = document.createElement('div'); last.className = 'log-line'; logEl.appendChild(last); }
+                last.textContent += data;
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+        };
+
         async function connectSerial() {
             try {
                 if (!('serial' in navigator)) {
-                    updateStatus('Web Serial API not supported in this browser. Use Chrome, Edge, or Brave.', 'error');
+                    updateStatus('Web Serial API not supported in this browser. Use Chrome, Edge, or Brave on desktop.', 'error');
                     return;
                 }
 
-                // Get available ports
-                const ports = await navigator.serial.getPorts();
-                const portSelect = document.getElementById('portSelect');
-                const portContainer = document.getElementById('portContainer');
+                // Always let the user pick the port explicitly (avoids grabbing a
+                // previously-authorised, unrelated device). Do NOT open it here —
+                // esptool-js opens/resets the port itself inside main().
+                device = await navigator.serial.requestPort();
+                transport = new Transport(device, false);
 
-                if (ports.length > 0) {
-                    // Auto-connect to first port if available
-                    port = ports[0];
-                    await openPort(port);
-                } else {
-                    // Show port selector
-                    portContainer.style.display = 'block';
-                    portSelect.innerHTML = '<option>Select a port...</option>';
+                log('Serial port selected.');
+                updateStatus('✓ Port selected — click "Flash Firmware" to begin.', 'connected');
 
-                    // Request a port
-                    port = await navigator.serial.requestPort();
-                    await openPort(port);
-                }
+                btnConnect.disabled = true;
+                btnDisconnect.disabled = false;
+                btnFlash.disabled = false;
             } catch (error) {
                 if (error.name === 'NotFoundError') {
-                    updateStatus('No port selected. Please select a port.', 'error');
+                    updateStatus('No port selected. Please pick your ESP32 COM port.', 'error');
                 } else {
                     updateStatus(`Connection error: ${error.message}`, 'error');
                     log(`Error: ${error.message}`);
@@ -319,35 +322,18 @@
             }
         }
 
-        async function openPort(selectedPort) {
-            try {
-                await selectedPort.open({ baudRate: 115200 });
-                transport = new Transport(selectedPort);
-
-                log('Connected to ESP32');
-                updateStatus('✓ Connected to ESP32', 'connected');
-
-                document.getElementById('btnConnect').disabled = true;
-                document.getElementById('btnDisconnect').disabled = false;
-                document.getElementById('btnFlash').disabled = false;
-                document.getElementById('portContainer').style.display = 'none';
-            } catch (error) {
-                updateStatus(`Failed to open port: ${error.message}`, 'error');
-                log(`Error: ${error.message}`);
-            }
-        }
-
         async function disconnectSerial() {
             try {
                 if (transport) {
-                    await transport.close();
+                    await transport.disconnect();
                     transport = null;
                 }
+                device = null;
 
                 updateStatus('Disconnected', 'info');
-                document.getElementById('btnConnect').disabled = false;
-                document.getElementById('btnDisconnect').disabled = true;
-                document.getElementById('btnFlash').disabled = true;
+                btnConnect.disabled = false;
+                btnDisconnect.disabled = true;
+                btnFlash.disabled = true;
                 document.getElementById('progressContainer').style.display = 'none';
                 log('Disconnected');
             } catch (error) {
@@ -361,85 +347,79 @@
             }
 
             isFlashing = true;
-            document.getElementById('btnFlash').disabled = true;
-            document.getElementById('btnConnect').disabled = true;
-            document.getElementById('btnDisconnect').disabled = true;
+            btnFlash.disabled = true;
+            btnConnect.disabled = true;
+            btnDisconnect.disabled = true;
 
             try {
-                updateProgress(0, 'Initializing...');
-                log('Starting flash process...');
-
-                const loader = new ESPLoader({ transport, logger: log });
-
-                updateProgress(10, 'Connecting to bootloader...');
-                await loader.connect();
-                log(`Chip: ${loader.getChipName()}`);
-                log(`MAC: ${Array.from(loader.read_mac()).map(x => x.toString(16).padStart(2, '0')).join(':')}`);
-
-                updateProgress(20, 'Reading flash info...');
-
-                // Fetch all firmware files
-                const fileData = [];
-                for (let i = 0; i < FIRMWARE_FILES.length; i++) {
-                    const file = FIRMWARE_FILES[i];
-                    log(`Fetching ${file.path}...`);
+                // 1) Download the firmware images first (fast, and fails loudly if a
+                //    .bin is missing before we touch the chip).
+                updateProgress(0, 'Downloading firmware…');
+                const fileArray = [];
+                for (const file of FIRMWARE_FILES) {
+                    log(`Downloading ${file.path}…`);
                     const response = await fetch(file.path);
-                    if (!response.ok) throw new Error(`Failed to fetch ${file.path}`);
-                    const data = await response.arrayBuffer();
-                    fileData.push({ data: new Uint8Array(data), offset: file.offset });
-                    updateProgress(20 + (i * 10), `Downloaded ${file.path}`);
+                    if (!response.ok) throw new Error(`Failed to fetch ${file.path} (HTTP ${response.status})`);
+                    const data = new Uint8Array(await response.arrayBuffer());
+                    fileArray.push({ data, address: file.address });
                 }
 
-                // Erase flash
-                updateProgress(50, 'Erasing flash...');
-                log('Erasing flash sectors...');
-                await loader.erase_flash();
+                // 2) Connect to the ROM bootloader and detect the chip. main() opens
+                //    the serial port, resets into download mode and returns the chip name.
+                updateProgress(10, 'Connecting to bootloader…');
+                log('Connecting to ESP32 bootloader…');
+                const esploader = new ESPLoader({ transport, baudrate: FLASH_BAUD, terminal: espTerminal });
+                const chip = await esploader.main();
+                log(`Detected chip: ${chip}`);
 
-                // Write files
-                for (let i = 0; i < fileData.length; i++) {
-                    const { data, offset } = fileData[i];
-                    const fileName = FIRMWARE_FILES[i].path;
-                    updateProgress(60 + (i * 13), `Writing ${fileName}...`);
-                    log(`Writing ${fileName} at offset 0x${offset.toString(16).padStart(4, '0')}`);
+                // 3) Erase the whole flash and write every image in one transaction.
+                //    'keep' preserves the flash mode/freq/size encoded in the image headers.
+                updateProgress(20, 'Erasing & writing flash…');
+                const totalFiles = fileArray.length;
+                await esploader.writeFlash({
+                    fileArray,
+                    flashSize: 'keep',
+                    flashMode: 'keep',
+                    flashFreq: 'keep',
+                    eraseAll: true,
+                    compress: true,
+                    reportProgress: (fileIndex, written, total) => {
+                        const fileName = FIRMWARE_FILES[fileIndex].path;
+                        const filePct = total ? Math.round((written / total) * 100) : 0;
+                        const overall = 20 + Math.round(((fileIndex + (total ? written / total : 0)) / totalFiles) * 75);
+                        updateProgress(overall, `Writing ${fileName} (${filePct}%)`);
+                    }
+                });
 
-                    await loader.write_flash({
-                        fileArray: [{ data, offset }],
-                        flashMode: 0,
-                        flashFreq: 40,
-                        flashSize: 'keep'
-                    });
-                }
-
-                updateProgress(99, 'Finalizing...');
-                log('Flash complete!');
-
-                // Reset device
-                await loader.hard_reset();
-                await new Promise(r => setTimeout(r, 1000));
+                // 4) Reboot into the freshly flashed application.
+                updateProgress(98, 'Rebooting…');
+                log('Flash complete — rebooting into firmware…');
+                await esploader.after('hard_reset');
 
                 updateProgress(100, 'Done!');
-                updateStatus('✓ Firmware flashed successfully! Device is rebooting...', 'connected');
-                log('Device rebooting. You can now configure it via WiFi.');
-
+                updateStatus('✓ Firmware flashed successfully! The device is rebooting…', 'connected');
+                log('Done. The ESP32 will boot the new firmware and start its WiFi setup access point.');
             } catch (error) {
                 updateStatus(`Flash failed: ${error.message}`, 'error');
                 log(`ERROR: ${error.message}`);
-                log(error.stack);
+                if (error.stack) log(error.stack);
             } finally {
                 isFlashing = false;
-                document.getElementById('btnFlash').disabled = false;
-                document.getElementById('btnConnect').disabled = false;
-                document.getElementById('btnDisconnect').disabled = false;
+                btnFlash.disabled = false;
+                btnConnect.disabled = false;
+                btnDisconnect.disabled = false;
             }
         }
 
-        // Check for Web Serial API support on load
-        window.addEventListener('load', () => {
-            if (!('serial' in navigator)) {
-                updateStatus('Web Serial API not supported. Use Chrome, Edge, or Brave.', 'error');
-                document.getElementById('btnConnect').disabled = true;
-            }
-        });
+        btnConnect.addEventListener('click', connectSerial);
+        btnDisconnect.addEventListener('click', disconnectSerial);
+        btnFlash.addEventListener('click', flashFirmware);
+
+        // Check for Web Serial API support on load (module scripts run after parse).
+        if (!('serial' in navigator)) {
+            updateStatus('Web Serial API not supported. Use Chrome, Edge, or Brave on desktop.', 'error');
+            btnConnect.disabled = true;
+        }
     </script>
 </body>
 </html>
