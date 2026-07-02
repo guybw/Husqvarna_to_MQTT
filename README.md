@@ -1,10 +1,15 @@
 # Husqvarna to MQTT — ESP32 Bridge
 
-A Bluetooth bridge that connects your Husqvarna/Flymo robotic mower to Home Assistant via MQTT.
+Control and monitor your **Husqvarna Automower**, **Flymo EasiLife**, or **Gardena**
+robotic lawn mower from **Home Assistant** — fully **local, with no cloud account**
+and no *Husqvarna Connect* / *Automower Connect* subscription.
 
-Built on **native ESP-IDF** for the ESP32-WROOM-32. This repository ships the
-readable application source plus a ready-to-flash firmware binary — flash it in
-your browser and configure everything from the on-device web UI.
+An **ESP32** (ESP32-WROOM-32) pairs with the mower over **Bluetooth Low Energy
+(BLE)**, decodes the mower protocol on-device, and publishes live status and
+controls to **MQTT** with **Home Assistant auto-discovery**. Built on **native
+ESP-IDF**; this repo ships the readable application source plus a ready-to-flash
+firmware binary — flash it from your browser and configure everything from the
+on-device web UI.
 
 ## ⚡ Flash Firmware
 
@@ -36,7 +41,7 @@ After flashing, the ESP32 broadcasts a WiFi access point:
 ## ✨ Features
 
 - 🔋 Real-time battery, state, and activity status
-- 📱 Start/pause/park commands via MQTT
+- 📱 Start / pause / resume + three park modes (until next schedule · until further notice · timed) via MQTT & web UI
 - 🏠 Home Assistant MQTT Discovery
 - 🔐 Secure BLE pairing with bonding
 - 🌐 Web UI for configuration and debugging
@@ -49,6 +54,26 @@ After flashing, the ESP32 broadcasts a WiFi access point:
 - **WiFi network** for the bridge
 - **MQTT broker** (Mosquitto, Home Assistant, etc.)
 - **Husqvarna/Flymo mower** with Bluetooth
+
+## ✅ Compatibility
+
+Works with **Husqvarna Group Bluetooth (BLE) robot mowers** that speak the
+*AutoMower BLE* protocol — the mowers you pair with a **PIN in the manufacturer's
+app**. These are sold under the **Flymo**, **Husqvarna**, **Gardena**, and
+**McCulloch** brands.
+
+- **Tested:** Flymo EasiLife GO 400, Flymo EasiLife 500.
+- **Likely compatible:** other Flymo EasiLife / EasiLife GO models and Husqvarna
+  Automower / Gardena / McCulloch BLE mowers using the same protocol. Behaviour can
+  vary by model and firmware — reports (working or not) are welcome via **Issues**.
+- **Not** for cloud/LTE-only Automower Connect models that have no local Bluetooth
+  pairing.
+
+> **Keywords / search terms:** Flymo EasiLife · Flymo EasiLife GO 400 / 500 ·
+> Husqvarna Automower · Gardena robot mower · McCulloch ROB · Bluetooth (BLE)
+> robotic lawn mower → **Home Assistant** over **MQTT** with an **ESP32** ·
+> local / offline / **no-cloud** · no Husqvarna Connect or Automower Connect
+> subscription · ESPHome / Bluetooth proxy alternative.
 
 ## 🔐 How to Pair Your Mower
 
@@ -150,7 +175,9 @@ mower; controls write straight back to it over BLE.
 ### Controls (read/write)
 | Control | Effect |
 |---------|--------|
-| Wake / Mow / Park / Pause (buttons) | Send the corresponding command to the mower |
+| Wake / Mow / Pause (buttons) | Send the corresponding command to the mower |
+| Park — 3 modes (buttons) | Until next schedule · **until further notice** (holds home, ignores the schedule) · timed / custom duration — mirrors the official app's park menu |
+| Resume (button) | Cancel a park/override and return to the weekly schedule |
 | FrostSense (switch) | Enable/disable frost protection |
 | Avoid garage (switch) | Tell the mower a garage/house module is installed |
 | LawnSense (select) | Off / Low / Medium / High auto-timer sensitivity |
