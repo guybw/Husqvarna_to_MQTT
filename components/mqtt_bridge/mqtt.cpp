@@ -102,7 +102,8 @@ namespace mqtt {
             ble_manager::force_wake();
         } else if (!ble_manager::queue_command(cmd, secs)) {
             debug_log::write(debug_log::WARN, SRC,
-                "unknown MQTT cmd '%s' (use mow|park|pause|wake or JSON action)", cmd);
+                "unknown MQTT cmd '%s' (use mow|park|park_indefinite|resume|pause|wake "
+                "or JSON action)", cmd);
         }
     }
 
@@ -319,7 +320,13 @@ namespace mqtt {
         // ── Controls: buttons (primary) + settings (config category) ───────
         pub_button("wake",  "Wake",  "wake");
         pub_button("mow",   "Mow",   "mow");
-        pub_button("park",  "Park",  "park");
+        pub_button("park",  "Park (until next schedule starts)", "park");
+        pub_button("park_hold", "Park (until further notice)", "park_indefinite");
+        pub_button("resume", "Resume schedule", "resume");
+        // Option 3 (park for a custom duration, overriding the schedule) is a
+        // value+action, so it doesn't fit a static button. HA automations can do
+        // it by publishing JSON to the cmd topic, e.g.
+        //   {"action":"park","duration":10800}   → park for 3 h then resume.
         pub_button("pause", "Pause", "pause");
         // FrostSense control switch (writes SetEnabled 5370:2 to the mower).
         pub_switch("frost_switch", "FrostSense",

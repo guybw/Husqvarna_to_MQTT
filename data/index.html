@@ -117,10 +117,24 @@
     <div id="mower-cmd-row" style="display:none">
       <button onclick="doMowerCmd('mow')"   style="color:#000;border-color:#4a4;">Mow</button>
       &nbsp;
-      <button onclick="doMowerCmd('park')"  style="color:#000;border-color:#e8a000;">Park</button>
-      &nbsp;
       <button onclick="doMowerCmd('pause')" style="color:#000;border-color:#88a;">Pause</button>
-      <span class="msg" id="mw-cmd-msg" style="margin-left:.6rem;"></span>
+      &nbsp;
+      <button onclick="doMowerCmd('resume')" style="color:#000;border-color:#4a4;" title="Clear any park override and follow the weekly schedule again">Resume schedule</button>
+
+      <div style="margin-top:.8rem;font-size:.82rem;opacity:.7;">Park options</div>
+      <div style="margin-top:.35rem;">
+        <button onclick="doMowerCmd('park')" style="color:#000;border-color:#e8a000;" title="Park until the next scheduled start, then resume automatically">Park (until next schedule starts)</button>
+      </div>
+      <div style="margin-top:.35rem;">
+        <button onclick="doMowerCmd('park_indefinite')" style="color:#000;border-color:#e8a000;" title="Park and stay home — ignores the schedule until you press Resume">Park (until further notice)</button>
+      </div>
+      <div style="margin-top:.35rem;">
+        <button onclick="doParkCustom()" style="color:#000;border-color:#e8a000;" title="Park now and override the schedule for the chosen time, then resume">Park (for custom duration &amp; override schedule)</button>
+        for
+        <input id="park-hours" type="number" min="0.25" step="0.25" value="3" style="width:4rem;padding:.2rem;">
+        hours
+      </div>
+      <span class="msg" id="mw-cmd-msg" style="display:block;margin-top:.5rem;"></span>
     </div>
   </section>
   <section>
@@ -930,15 +944,29 @@ function doWake() {
     .catch(function(){ msg.textContent = 'Failed.'; });
 }
 
-function doMowerCmd(cmd) {
+function doMowerCmd(cmd, val) {
   var msg = document.getElementById('mw-cmd-msg');
   msg.textContent = 'Sending ' + cmd + '…';
-  fetch('/api/mower/command', {method:'POST', body:new URLSearchParams({cmd:cmd})})
+  var body = { cmd: cmd };
+  if (val !== undefined && val !== null && val !== '') body.val = val;
+  fetch('/api/mower/command', {method:'POST', body:new URLSearchParams(body)})
     .then(function(r){ return r.json(); })
     .then(function(j) {
       msg.textContent = j.ok ? cmd + ' sent.' : ('Error: ' + (j.error || '?'));
     })
     .catch(function(){ msg.textContent = 'Failed.'; });
+}
+
+// Option 3: park now for a custom number of hours (SetOverridePark), overriding
+// the schedule, then auto-resume. Sends the same 'park' command but WITH a
+// duration in seconds — the firmware routes park+duration to SetOverridePark.
+function doParkCustom() {
+  var h = parseFloat(document.getElementById('park-hours').value);
+  if (!(h > 0)) {
+    document.getElementById('mw-cmd-msg').textContent = 'Enter a number of hours greater than 0.';
+    return;
+  }
+  doMowerCmd('park', Math.round(h * 3600));
 }
 
 // ---- Debug: SSE log ----

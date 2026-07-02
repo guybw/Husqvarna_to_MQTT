@@ -218,6 +218,18 @@ namespace ble_manager {
     static std::atomic<bool>  _user_wake(false);   // this attempt is user-driven
     static std::atomic<bool>  _rest_pending(false);// conn_task scheduled the rest
 
+    // ── "Confirm arrival" (option A) ─────────────────────────────────────
+    // After a Park command the mower drives home (activity=GOING_HOME) then
+    // settles (PARKED/CHARGING). If it drops the BLE link mid-transit we'd freeze
+    // on "going home" — in manual-only mode the conn_task won't reconnect. While
+    // this flag is set we DO reconnect after a drop (short interval) until the
+    // mower reaches a benign resting state, then clear it. Bounded by the deadline
+    // so it can't churn or keep the mower awake indefinitely.
+    static std::atomic<bool>     _confirm_arrival(false);
+    static std::atomic<uint32_t> _confirm_deadline_ms(0);
+    static constexpr uint32_t    CONFIRM_MAX_MS     = 15UL * 60UL * 1000UL; // 15 min cap
+    static constexpr uint32_t    CONFIRM_RECHECK_MS = 90000;                // reconnect 90 s after a drop
+
     // ── Pending command (0=none, 1=mow, 2=park, 3=pause) ─────────────────
     static std::atomic<uint8_t>  _pending_cmd(0);
     static std::atomic<uint32_t> _pending_cmd_secs(0);
@@ -407,7 +419,8 @@ namespace ble_manager {
     static bool _send_query(uint16_t major, uint16_t minor,
                             const uint8_t* payload, size_t payload_len,
                             uint8_t* resp_out, size_t resp_max, size_t* resp_len_out,
-                            uint32_t timeout_ms = 5000) {
+                            uint32_t timeout_ms = 5000,
+                            uint8_t* result_out = nullptr) {
         if (!_ble_io_mutex || xSemaphoreTake(_ble_io_mutex, pdMS_TO_TICKS(5000)) != pdTRUE)
             return false;
         uint8_t buf[64];  // 64 ≥ largest frame (AddTask = 18 hdr + 15 payload + 2)
@@ -424,6 +437,9 @@ namespace ble_manager {
             uint16_t maj = 0, min = 0;
             const uint8_t* p = nullptr; size_t plen_resp = 0;
             if (automower::decode_response(raw, raw_n, &maj, &min, &p, &plen_resp)) {
+                // decode_response guarantees raw_n ≥ 21, so byte[16] (the mower's
+                // ResponseResult: 0=OK, 4=NOT_AVAILABLE, 9=INVALID_PIN…) is valid.
+                if (result_out) *result_out = raw[16];
                 size_t copy = plen_resp < resp_max ? plen_resp : resp_max;
                 if (resp_out && copy > 0) memcpy(resp_out, p, copy);
                 if (resp_len_out) *resp_len_out = copy;
@@ -514,7 +530,12 @@ namespace ble_manager {
     }
 
     static bool decode_task(const uint8_t* resp, size_t len, ScheduleTask& out) {
-        if (len < 17) return false;
+        // We consume 15 bytes: start(4) + duration(4) + 7 day-flags (bytes 8..14).
+        // The EasiLife GO 400 returns a longer (≥17 B) struct with trailing bytes
+        // we ignore; other models (e.g. EasiLife 500) may return exactly the 15 we
+        // need, so don't reject those. (Was `len < 17`, which dropped valid short
+        // task structs — see issue #3.)
+        if (len < 15) return false;
         out.start = u32le(resp);
         out.duration = u32le(resp + 4);
         out.use_on[0] = resp[8] != 0;
@@ -528,9 +549,18 @@ namespace ble_manager {
     }
 
     static bool get_number_of_tasks(uint32_t& out) {
-        uint8_t val[4]; size_t vlen = 0;
-        if (!_send_query(4690, 4, nullptr, 0, val, sizeof(val), &vlen) || vlen < 4)
+        uint8_t val[4]; size_t vlen = 0; uint8_t result = 0xFF;
+        if (!_send_query(4690, 4, nullptr, 0, val, sizeof(val), &vlen, 5000, &result)) {
+            debug_log::write(debug_log::WARN, SRC,
+                "GetNumberOfTasks: no/bad response");
             return false;
+        }
+        if (result != 0 || vlen < 4) {
+            debug_log::write(debug_log::WARN, SRC,
+                "GetNumberOfTasks: result=%u len=%u (want OK/≥4)",
+                (unsigned)result, (unsigned)vlen);
+            return false;
+        }
         out = u32le(val);
         return true;
     }
@@ -542,10 +572,24 @@ namespace ble_manager {
             (uint8_t)((task_id >> 16) & 0xFF),
             (uint8_t)((task_id >> 24) & 0xFF)
         };
-        uint8_t resp[32]; size_t len = 0;
-        if (!_send_query(4690, 5, req, sizeof(req), resp, sizeof(resp), &len))
+        uint8_t resp[32]; size_t len = 0; uint8_t result = 0xFF;
+        if (!_send_query(4690, 5, req, sizeof(req), resp, sizeof(resp), &len, 5000, &result)) {
+            debug_log::write(debug_log::WARN, SRC,
+                "GetTask[%u]: no/bad response", (unsigned)task_id);
             return false;
-        return decode_task(resp, len, out);
+        }
+        if (result != 0) {
+            debug_log::write(debug_log::WARN, SRC,
+                "GetTask[%u]: result=%u", (unsigned)task_id, (unsigned)result);
+            return false;
+        }
+        if (!decode_task(resp, len, out)) {
+            debug_log::write(debug_log::WARN, SRC,
+                "GetTask[%u]: decode failed (payload len=%u)",
+                (unsigned)task_id, (unsigned)len);
+            return false;
+        }
+        return true;
     }
 
     static bool start_task_transaction() {
@@ -591,12 +635,23 @@ namespace ble_manager {
 
     static bool _read_schedule(ScheduleTask* out, uint32_t max_out, uint32_t* out_count) {
         if (!out || !out_count) return false;
-        if (!is_authenticated()) return false;
+        if (!is_authenticated()) {
+            debug_log::write(debug_log::WARN, SRC, "read_schedule: not authenticated");
+            return false;
+        }
         uint32_t count = 0;
-        if (!get_number_of_tasks(count)) return false;
-        if (count > max_out) return false;
+        if (!get_number_of_tasks(count)) return false;   // logs its own reason
+        debug_log::write(debug_log::INFO, SRC,
+            "read_schedule: mower reports %u task(s)", (unsigned)count);
+        if (count > max_out) {
+            // Don't hard-fail (which the UI shows as "unavailable"); read what fits.
+            debug_log::write(debug_log::WARN, SRC,
+                "read_schedule: count %u > buffer %u — clamping",
+                (unsigned)count, (unsigned)max_out);
+            count = max_out;
+        }
         for (uint32_t i = 0; i < count; i++) {
-            if (!get_task(i, out[i])) return false;
+            if (!get_task(i, out[i])) return false;       // logs its own reason
         }
         *out_count = count;
         return true;
@@ -958,9 +1013,17 @@ namespace ble_manager {
                 // conn_task already scheduled _next_attempt_ms and set the
                 // detail before disconnecting; just settle into DORMANT.
                 _conn_state = static_cast<uint8_t>(ConnState::DORMANT);
+            } else if (_confirm_arrival.load() &&
+                       (int32_t)(millis() - _confirm_deadline_ms.load()) < 0) {
+                // A commanded Park is still in flight (mower likely driving home).
+                // Re-check soon — even in manual-only mode — so we observe it
+                // settle instead of freezing on "going home".
+                _next_attempt_ms = millis() + CONFIRM_RECHECK_MS;
+                set_state(ConnState::DORMANT, "confirming outcome — re-check shortly");
             } else {
                 // Unexpected drop (mower slept mid-session / link lost). Leave
                 // the mower alone and re-check on the long interval.
+                _confirm_arrival = false;
                 _next_attempt_ms = millis() + _idle_recheck_ms;
                 char det[64];
                 recheck_detail(det, sizeof(det), "disconnected");
@@ -1428,6 +1491,7 @@ namespace ble_manager {
     // next-start sooner than _idle_recheck_ms, wake just after it; otherwise
     // re-check on the long interval (which also covers battery-temp polling).
     static void enter_rest() {
+        _confirm_arrival = false;   // mower has settled — Park outcome confirmed
         uint32_t delay_ms = _idle_recheck_ms;
         // Only time the next check from the mower's next-start when auto-recheck
         // is enabled (0 = manual-only: never auto-wake, not even at next-start).
@@ -1498,8 +1562,11 @@ namespace ble_manager {
                 if (_target_addr[0] == '\0') continue;
                 if (_scanning) continue;
                 // recheck == 0 → manual-only: DORMANT never auto-connects. Only a
-                // Wake/command (which moves us to IDLE) leaves DORMANT.
-                if (s == ConnState::DORMANT && _idle_recheck_ms == 0) continue;
+                // Wake/command (which moves us to IDLE) leaves DORMANT — EXCEPT
+                // while confirming a Park's outcome (see _confirm_arrival), where
+                // we reconnect until the mower settles home.
+                if (s == ConnState::DORMANT && _idle_recheck_ms == 0 &&
+                    !_confirm_arrival.load()) continue;
                 if (s == ConnState::DORMANT &&
                     (int32_t)(now - _next_attempt_ms) < 0) continue;
                 bool wake = _wake_read_pending.exchange(false);
@@ -1602,10 +1669,42 @@ namespace ble_manager {
                                                     : debug_log::WARN, SRC,
                             "cmd: %s %s", nm, (ok1 && ok2) ? "OK" : "failed");
                     }
+                    else if (cmd == 16) {
+                        // Park until further notice: clear any active override, switch
+                        // to HOME mode (parks forever, ignores the week schedule — so
+                        // the schedule can't send it back out) then StartTrigger.
+                        // Recipe confirmed from the Flymo app + Marbanz reference.
+                        debug_log::write(debug_log::INFO, SRC,
+                            "cmd: park until further notice");
+                        uint8_t home = 2;  // IMOWERAPP_MODE_HOME
+                        bool ok = send_command(4658, 6, nullptr, 0);       // ClearOverride
+                        ok = send_command(4586, 0, &home, 1) && ok;        // SetMode(HOME)
+                        ok = send_command(4586, 4, nullptr, 0) && ok;      // StartTrigger
+                        debug_log::write(ok ? debug_log::INFO : debug_log::WARN, SRC,
+                            "cmd: park (further notice) %s", ok ? "OK" : "failed");
+                    }
+                    else if (cmd == 17) {
+                        // Resume normal operation: clear any override and return to
+                        // AUTO mode (follow the week schedule) then StartTrigger.
+                        debug_log::write(debug_log::INFO, SRC, "cmd: resume schedule");
+                        uint8_t auto_mode = 0;  // IMOWERAPP_MODE_AUTO
+                        bool ok = send_command(4658, 6, nullptr, 0);       // ClearOverride
+                        ok = send_command(4586, 0, &auto_mode, 1) && ok;   // SetMode(AUTO)
+                        ok = send_command(4586, 4, nullptr, 0) && ok;      // StartTrigger
+                        debug_log::write(ok ? debug_log::INFO : debug_log::WARN, SRC,
+                            "cmd: resume %s", ok ? "OK" : "failed");
+                    }
                     if (major != 0) {
                         debug_log::write(debug_log::INFO, SRC, "cmd: sending %s", cmd_name);
                         bool ok = false;
                         if (cmd == 1 || cmd == 2) {
+                            if (cmd == 1) {
+                                // Force AUTO first so "Mow" works even after a
+                                // "park until further notice" — HOME mode cannot be
+                                // overridden with forced mowing (matches the app).
+                                uint8_t auto_mode = 0;   // IMOWERAPP_MODE_AUTO
+                                send_command(4586, 0, &auto_mode, 1);  // SetMode(AUTO)
+                            }
                             ok = send_command(major, minor,
                                               plen ? payload : nullptr, plen);
                             if (ok) {
@@ -1944,7 +2043,16 @@ namespace ble_manager {
         else if (strcmp(cmd, "collision_low")  == 0) c = 13;
         else if (strcmp(cmd, "collision_med")  == 0) c = 14;
         else if (strcmp(cmd, "collision_high") == 0) c = 15;
+        else if (strcmp(cmd, "park_indefinite")== 0) c = 16;  // park until further notice
+        else if (strcmp(cmd, "resume")         == 0) c = 17;  // resume week schedule
         else return false;
+        // Park sends the mower home — track until it actually settles there, even
+        // in manual-only mode, so the UI/MQTT don't freeze on "going home".
+        // (Mow/Resume show their effect during the command hold; not tracked here.)
+        if (c == 2 || c == 16) {
+            _confirm_deadline_ms = millis() + CONFIRM_MAX_MS;
+            _confirm_arrival = true;
+        }
         if (_pending_cmd_mutex &&
             xSemaphoreTake(_pending_cmd_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
             _pending_cmd_secs = secs;

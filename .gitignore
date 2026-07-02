@@ -27,6 +27,7 @@ CHANGELOG.md
 # ── Research / reference material (not published) ─────
 /src/
 /reference/
+/research/
 *.xapk
 *.apk
 decompile_*.py
