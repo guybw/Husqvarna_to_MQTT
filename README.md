@@ -200,4 +200,4 @@ This project builds on the excellent work of the open-source community:
 
 ---
 
-**Version:** 0.18.0-dev | **Framework:** native ESP-IDF | **License:** GPL-3.0-or-later | [GitHub](https://github.com/guybw/Husqvarna_to_MQTT)
+**Version:** 0.21.0-dev | **Framework:** native ESP-IDF | **License:** GPL-3.0-or-later | [GitHub](https://github.com/guybw/Husqvarna_to_MQTT)
