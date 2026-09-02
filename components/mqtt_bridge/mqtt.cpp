@@ -33,6 +33,9 @@ namespace mqtt {
     static uint32_t _last_pub   = 0;
     static bool     _configured = false;
     static bool     _connected  = false;
+    static bool     _ever_connected = false;  // we've reached the broker at least once
+    static bool     _wifi_was_up    = false;  // edge-detect WiFi regain
+    static uint32_t _wifi_back_at   = 0;      // ms of the last WiFi down→up edge (0 = handled)
 
     // Broker host/user/pass strings must outlive the client (esp-mqtt keeps
     // pointers into the config). Keep them in file-static std::strings.
@@ -41,6 +44,10 @@ namespace mqtt {
     static std::string _pass;
 
     static constexpr uint32_t PUBLISH_MS = 10000;
+    // After WiFi comes back, wait this long for esp-mqtt to reconnect on its own
+    // before forcing it. Covers the normal reconnect; only a wedged client (dead
+    // half-open socket, or a new DHCP IP after a router reboot) needs the nudge.
+    static constexpr uint32_t MQTT_WIFI_REGAIN_GRACE_MS = 15000;
 
     static uint32_t now_ms() { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -561,6 +568,7 @@ namespace mqtt {
         switch ((esp_mqtt_event_id_t)event_id) {
             case MQTT_EVENT_CONNECTED:
                 _connected = true;
+                _ever_connected = true;
                 esp_mqtt_client_publish(_client, _t_avail, "online", 0, 0, true);
                 esp_mqtt_client_subscribe(_client, _t_cmd, 0);
                 pub_discovery();
@@ -625,6 +633,10 @@ namespace mqtt {
         cfg.session.last_will.msg_len= 0;       // 0 = strlen("offline")
         cfg.session.last_will.qos    = 0;
         cfg.session.last_will.retain = true;
+        // Shorter keepalive (default 120 s) so a dead link — e.g. the AP vanishing
+        // on a power cut with no deauth, leaving a half-open socket — is detected
+        // and reconnected in ~45 s instead of a few minutes.
+        cfg.session.keepalive        = 30;
         // HA discovery payloads exceed esp-mqtt's default 1024 outbox/buffer
         // headroom on bursts; bump the TX buffer like PubSubClient's setBufferSize.
         cfg.buffer.size              = 2048;  // headroom for HA discovery + schedule
@@ -645,7 +657,24 @@ namespace mqtt {
 
     void loop() {
         if (!_configured) return;
-        if (!wifi_manager::is_connected()) return;
+
+        // esp-mqtt auto-reconnects on its own, but after a longer WiFi outage it
+        // can sit in a long backoff (or on a stale socket) while the STA is
+        // already back — the symptom being "WiFi recovered but MQTT stayed
+        // offline until a power-cycle". On the WiFi down→up edge, give esp-mqtt a
+        // grace period then force one clean reconnect from a known state.
+        bool wifi_up = wifi_manager::is_connected();
+        if (wifi_up && !_wifi_was_up) _wifi_back_at = now_ms();  // just returned
+        _wifi_was_up = wifi_up;
+        if (wifi_up && !_connected && _ever_connected && _wifi_back_at &&
+            now_ms() - _wifi_back_at >= MQTT_WIFI_REGAIN_GRACE_MS) {
+            _wifi_back_at = 0;                                   // one nudge per outage
+            debug_log::write(debug_log::WARN, SRC,
+                "WiFi back but broker still unreachable — forcing reconnect");
+            esp_mqtt_client_reconnect(_client);
+        }
+
+        if (!wifi_up) return;
         if (!_connected) return;       // esp-mqtt task handles (re)connect
 
         uint32_t now = now_ms();

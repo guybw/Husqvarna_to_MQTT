@@ -188,10 +188,18 @@ namespace wifi_manager {
             pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
 
         if (!(bits & BIT_GOT_IP)) {
+            // We only get here with a saved SSID (the no-SSID case started the AP
+            // above and returned). Do NOT fall back to the captive portal: that
+            // latched _portal=true with no path back to STA, so a device powered
+            // up before its WiFi was available (router still booting after a
+            // power cut) stayed stuck in AP mode until a manual power-cycle.
+            // Instead keep the STA running — the WIFI_EVENT_STA_DISCONNECTED
+            // handler keeps calling esp_wifi_connect(), so it joins the moment
+            // the network reappears. The portal is still reachable by wiping
+            // credentials (hold the reset button RESET_HOLD_MS) or a no-SSID boot.
             debug_log::write(debug_log::WARN, SRC,
-                "STA timeout after %u ms — falling back to AP", WIFI_CONNECT_TIMEOUT_MS);
-            esp_wifi_stop();
-            start_ap();
+                "STA not up after %u ms — staying in STA, retrying until it appears",
+                WIFI_CONNECT_TIMEOUT_MS);
         }
     }
 

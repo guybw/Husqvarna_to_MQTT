@@ -26,5 +26,5 @@
 // Version source of truth for the ESP-IDF build (there is no platformio.ini
 // anymore). Bump here per the CLAUDE.md versioning rule.
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "0.22.2-dev"
+#define FIRMWARE_VERSION "0.23.0-dev"
 #endif
