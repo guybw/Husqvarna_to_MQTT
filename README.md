@@ -42,6 +42,7 @@ After flashing, the ESP32 broadcasts a WiFi access point:
 
 - 🔋 Real-time battery, state, and activity status
 - 📱 Start / pause / resume + three park modes (until next schedule · until further notice · timed) via MQTT & web UI
+- ⚠️ Fault codes decoded to plain English, with a one-click "Clear error" once fixed
 - 🏠 Home Assistant MQTT Discovery
 - 🔐 Secure BLE pairing with bonding
 - 🌐 Web UI for configuration and debugging

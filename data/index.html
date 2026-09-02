@@ -106,6 +106,7 @@
       <dt>Battery</dt><dd id="mw-battery">—</dd>
       <dt>Next start</dt><dd id="mw-next">—</dd>
       <dt>Detail</dt><dd id="mw-detail">—</dd>
+      <dt>Fault</dt><dd id="mw-error">—</dd>
     </dl>
   </section>
   <section>
@@ -115,6 +116,10 @@
       <span class="msg" id="mw-wake-msg" style="margin-left:.6rem;"></span>
     </div>
     <div id="mower-cmd-row" style="display:none">
+      <div id="mower-error-row" style="display:none;margin-bottom:.8rem;">
+        <button onclick="doMowerCmd('clear_error')" style="color:#000;border-color:#e05050;" title="Acknowledge/clear a latched fault (only works once the underlying problem is actually fixed)">Clear error</button>
+        <span class="msg" id="mw-error-msg" style="margin-left:.4rem;"></span>
+      </div>
       <button onclick="doMowerCmd('mow')"   style="color:#000;border-color:#4a4;">Mow</button>
       &nbsp;
       <button onclick="doMowerCmd('pause')" style="color:#000;border-color:#88a;">Pause</button>
@@ -774,6 +779,9 @@ function loadMowerTab() {
       document.getElementById('mw-battery').textContent  = mb !== null ? mb + '%'                          : '—';
       document.getElementById('mw-next').textContent     = fmtNextStart(j.mower_next_start);
       document.getElementById('mw-detail').textContent   = j.detail || '—';
+      document.getElementById('mw-error').textContent    = j.error_text || '—';
+      document.getElementById('mower-error-row').style.display =
+        (typeof j.error === 'number' && j.error > 0) ? '' : 'none';
       document.getElementById('mower-wake-row').style.display = isAuth ? 'none' : '';
       document.getElementById('mower-cmd-row').style.display  = isAuth ? ''     : 'none';
       document.getElementById('mower-settings').style.display = isAuth ? '' : 'none';

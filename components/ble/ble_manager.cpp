@@ -502,7 +502,15 @@ namespace ble_manager {
             uint16_t maj = 0, min = 0;
             const uint8_t* rp = nullptr; size_t rplen = 0;
             if (automower::decode_response(raw, raw_n, &maj, &min, &rp, &rplen)) {
-                ok = true;
+                uint8_t result = raw[16];   // ResponseResult; decode_response
+                                             // only validates frame shape, not this
+                ok = (result == 0);
+                if (!ok) {
+                    debug_log::write(debug_log::WARN, SRC,
+                        "cmd: mower declined %u:%u — %s (%u)",
+                        (unsigned)major, (unsigned)minor,
+                        automower::result_str(result), (unsigned)result);
+                }
                 break;
             }
             debug_log::write(debug_log::WARN, SRC,
@@ -1626,6 +1634,7 @@ namespace ble_manager {
                         }
                     }
                     else if (cmd == 3) { major = 4586; minor = 5; cmd_name = "pause"; }
+                    else if (cmd == 18) { major = 4586; minor = 9; cmd_name = "clear_error"; }  // ConfirmError
                     else if (cmd == 4 || cmd == 5) {
                         major = 5370; minor = 2;
                         cmd_name = (cmd == 4) ? "frost_on" : "frost_off";
@@ -2045,6 +2054,7 @@ namespace ble_manager {
         else if (strcmp(cmd, "collision_high") == 0) c = 15;
         else if (strcmp(cmd, "park_indefinite")== 0) c = 16;  // park until further notice
         else if (strcmp(cmd, "resume")         == 0) c = 17;  // resume week schedule
+        else if (strcmp(cmd, "clear_error")    == 0) c = 18;  // ConfirmError 4586:9
         else return false;
         // Park sends the mower home — track until it actually settles there, even
         // in manual-only mode, so the UI/MQTT don't freeze on "going home".

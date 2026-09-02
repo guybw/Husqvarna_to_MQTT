@@ -33,4 +33,14 @@ namespace automower {
     bool decode_response(const uint8_t* in, size_t in_len,
                          uint16_t* out_major_id, uint16_t* out_minor_id,
                          const uint8_t** out_payload, size_t* out_payload_len);
+
+    // Mower fault code (GetError, 4586/6) -> human text. Reverse-engineered
+    // from the Husqvarna/Gardena Android app's shared error enum (see
+    // research/notes/upstream-error-codes.py); numbering is shared across the
+    // whole Automower/Gardena line so not every code applies to the GO 400.
+    const char* mower_error_str(int32_t code);
+
+    // Response frame's ResponseResult byte (byte[16]) -> human text.
+    // 0=OK; nonzero means the mower understood the request but declined it.
+    const char* result_str(uint8_t result);
 }

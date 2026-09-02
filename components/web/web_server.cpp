@@ -11,6 +11,7 @@
 #include "debug_log.h"
 #include "wifi_manager.h"
 #include "ble_manager.h"
+#include "automower_protocol.h"
 #include "web_assets.h"   // gzipped UI embedded in flash (generated)
 
 #include "esp_http_server.h"
@@ -584,14 +585,23 @@ namespace web_server {
         else strcpy(dpw, "null");
         if (st.collision_resp >= 0) snprintf(cre, sizeof(cre), "%d", (int)st.collision_resp);
         else strcpy(cre, "null");
-        char buf[448];
+        char mer[16], mtx[96];
+        if (st.mower_error >= 0) {
+            snprintf(mer, sizeof(mer), "%ld", (long)st.mower_error);
+            snprintf(mtx, sizeof(mtx), "\"%s\"", automower::mower_error_str(st.mower_error));
+        } else {
+            strcpy(mer, "null");
+            strcpy(mtx, "null");
+        }
+        char buf[640];
         snprintf(buf, sizeof(buf),
             "{\"state\":\"%s\",\"addr\":\"%s\",\"name\":\"%s\","
             "\"rssi\":%d,\"detail\":\"%s\","
             "\"mower_state\":%s,\"mower_activity\":%s,\"mower_battery\":%s,"
-            "\"mower_next_start\":%s,\"drive_past\":%s,\"collision_resp\":%s}",
+            "\"mower_next_start\":%s,\"drive_past\":%s,\"collision_resp\":%s,"
+            "\"error\":%s,\"error_text\":%s}",
             state_str, st.addr, st.name, (int)st.rssi, st.detail,
-            ms, ma, mb, mns, dpw, cre);
+            ms, ma, mb, mns, dpw, cre, mer, mtx);
         return send_ok(req, buf);
     }
 

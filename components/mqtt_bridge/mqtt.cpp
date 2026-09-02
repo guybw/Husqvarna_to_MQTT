@@ -10,6 +10,7 @@
 #include "debug_log.h"
 #include "wifi_manager.h"
 #include "ble_manager.h"
+#include "automower_protocol.h"
 #include "mqtt_client.h"
 #include "esp_timer.h"
 #include <ArduinoJson.h>
@@ -102,8 +103,8 @@ namespace mqtt {
             ble_manager::force_wake();
         } else if (!ble_manager::queue_command(cmd, secs)) {
             debug_log::write(debug_log::WARN, SRC,
-                "unknown MQTT cmd '%s' (use mow|park|park_indefinite|resume|pause|wake "
-                "or JSON action)", cmd);
+                "unknown MQTT cmd '%s' (use mow|park|park_indefinite|resume|pause|"
+                "clear_error|wake or JSON action)", cmd);
         }
     }
 
@@ -328,6 +329,9 @@ namespace mqtt {
         // it by publishing JSON to the cmd topic, e.g.
         //   {"action":"park","duration":10800}   → park for 3 h then resume.
         pub_button("pause", "Pause", "pause");
+        // Acknowledge a latched fatal error (ConfirmError 4586:9) — only useful
+        // once the underlying problem (e.g. Upside down) is actually fixed.
+        pub_button("clear_error", "Clear error", "clear_error");
         // FrostSense control switch (writes SetEnabled 5370:2 to the mower).
         pub_switch("frost_switch", "FrostSense",
             "{{ 'ON' if value_json.frost_enabled else 'OFF' }}",
@@ -341,7 +345,7 @@ namespace mqtt {
         pub_select4("lawnsense", "LawnSense",
             "Off", "Low", "Medium", "High",
             "{{ value_json.lawn_opt if value_json.lawn_opt is not none "
-            "else 'Off' }}",
+            "else 'None' }}",
             "{{ {'Off':'lawn_off','Low':'lawn_low','Medium':'lawn_med',"
             "'High':'lawn_high'}[value] }}", "config");
         // Drive-past-wire (4712:0/1): front overrun distance past the boundary
@@ -352,11 +356,14 @@ namespace mqtt {
             "{\"action\":\"drivepast\",\"duration\":{{ value }}}",
             0, 50, 1, "cm", "config");
         // Collision responsiveness (4166:11/12): how sensitively the mower
-        // reacts to bumps (Low/Medium/High).
+        // reacts to bumps (Low/Medium/High). Fall back to the literal "None"
+        // (HA's PAYLOAD_NONE) when the mower hasn't reported it — a model that
+        // lacks 4166/11, or before the first read. Anything not in the option
+        // list makes HA's mqtt.select log "Invalid option" on every publish.
         pub_select4("collision_resp", "Collision sensitivity",
             "Low", "Medium", "High", nullptr,
             "{{ value_json.collision_opt if value_json.collision_opt is not none "
-            "else 'Unknown' }}",
+            "else 'None' }}",
             "{{ {'Low':'collision_low','Medium':'collision_med',"
             "'High':'collision_high'}[value] }}", "config");
 
@@ -365,7 +372,7 @@ namespace mqtt {
             "{{ value_json.conn }}", "", "", "diagnostic");
         pub_dur("charge_left", "Charge time remaining", "charge_left", "diagnostic");
         pub_sensor("error", "Error code",
-            "{{ value_json.error if value_json.error is not none else 'Unknown' }}",
+            "{{ value_json.error_text if value_json.error_text is not none else 'Unknown' }}",
             "", "", "diagnostic");
         pub_sensor("batt_temp", "Battery temperature",
             "{{ value_json.batt_temp }}", "°C", "temperature", "diagnostic");
@@ -438,6 +445,8 @@ namespace mqtt {
         if (st.mower_charging >= 0) strcpy(mch, st.mower_charging ? "true" : "false");      else strcpy(mch, "null");
         if (st.mower_charge_left >= 0) snprintf(mcl, sizeof(mcl), "%ld", (long)st.mower_charge_left); else strcpy(mcl, "null");
         if (st.mower_error      >= 0) snprintf(mer, sizeof(mer), "%ld", (long)st.mower_error);        else strcpy(mer, "null");
+        char mtx[80];
+        if (st.mower_error >= 0) snprintf(mtx, sizeof(mtx), "\"%s\"", automower::mower_error_str(st.mower_error)); else strcpy(mtx, "null");
         if (st.mower_restriction>= 0) snprintf(mrs, sizeof(mrs), "%d", (int)st.mower_restriction);    else strcpy(mrs, "null");
         if (st.mower_next_start >= 0) snprintf(mns, sizeof(mns), "%ld", (long)st.mower_next_start);   else strcpy(mns, "null");
 
@@ -470,7 +479,7 @@ namespace mqtt {
         else if (st.lawn_sens == 1)     strcpy(lo, "\"Low\"");
         else if (st.lawn_sens == 2)     strcpy(lo, "\"Medium\"");
         else if (st.lawn_sens == 3)     strcpy(lo, "\"High\"");
-        else                            strcpy(lo, "\"Unknown\"");
+        else                            strcpy(lo, "null");  // not an option → HA select warns; let val_tpl map to "None"
         if (st.stat_running    >= 0) snprintf(s_run, sizeof(s_run), "%ld", (long)st.stat_running);    else strcpy(s_run, "null");
         if (st.stat_cutting    >= 0) snprintf(s_cut, sizeof(s_cut), "%ld", (long)st.stat_cutting);    else strcpy(s_cut, "null");
         if (st.stat_charging   >= 0) snprintf(s_chg, sizeof(s_chg), "%ld", (long)st.stat_charging);   else strcpy(s_chg, "null");
@@ -486,10 +495,10 @@ namespace mqtt {
         else if (st.collision_resp == 2) strcpy(cro, "\"High\"");
         else                              strcpy(cro, "null");
 
-        char buf[1100];
+        char buf[1200];
         int n = snprintf(buf, sizeof(buf),
             "{\"conn\":\"%s\",\"state\":%s,\"activity\":%s,\"battery\":%s,"
-            "\"charging\":%s,\"charge_left\":%s,\"error\":%s,"
+            "\"charging\":%s,\"charge_left\":%s,\"error\":%s,\"error_text\":%s,"
             "\"restriction\":%s,\"next_start\":%s,"
             "\"batt_temp\":%s,\"pitch\":%s,\"roll\":%s,"
             "\"collision\":%s,\"lift\":%s,"
@@ -500,7 +509,7 @@ namespace mqtt {
             "\"run_time\":%s,\"cut_time\":%s,\"charge_time\":%s,"
             "\"search_time\":%s,\"collisions\":%s,\"charge_cycles\":%s,"
             "\"blade_time\":%s,\"drive_past\":%s,\"collision_opt\":%s}",
-            conn_str(st.state), ms, ma, mb, mch, mcl, mer, mrs, mns,
+            conn_str(st.state), ms, ma, mb, mch, mcl, mer, mtx, mrs, mns,
             bt, pa, ra, co, li, pm, fa, fe,
             bv, ls, la, lf, lg,
             gg, lav, lo,
