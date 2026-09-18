@@ -245,6 +245,20 @@ namespace ble_manager {
     static std::atomic<bool>     _lost_contact_recheck(false);
     static constexpr uint32_t    LOST_CONTACT_RECHECK_MS = 15UL * 60UL * 1000UL; // 15 min
 
+    // ── "First wake after idle often fails" one-shot retry ────────────────
+    // Observed on hardware repeatedly (2026-09-18 log): a user-triggered Wake
+    // exhausts both do_connect_and_handshake address-type attempts (~60 s
+    // total) and gives up, then a second manual Wake ~40 s later connects on
+    // the very first try. Matches the documented "mower needs 2-4 connection
+    // attempts before echo responds (BLE stack warm-up after power-on)"
+    // behaviour — so rather than making the user notice and click Wake again,
+    // arm exactly one automatic retry WAKE_RETRY_MS after a failed
+    // user-initiated wake. Only for user wakes (not passive idle rechecks,
+    // which already have their own long-interval retry). Consumed the moment
+    // any attempt runs, same one-shot pattern as _lost_contact_recheck.
+    static std::atomic<bool>     _wake_retry_pending(false);
+    static constexpr uint32_t    WAKE_RETRY_MS = 20UL * 1000UL; // 20 s
+
     // ── Pending command (0=none, 1=mow, 2=park, 3=pause) ─────────────────
     static std::atomic<uint8_t>  _pending_cmd(0);
     static std::atomic<uint32_t> _pending_cmd_secs(0);
@@ -1603,16 +1617,19 @@ namespace ble_manager {
                 if (_scanning) continue;
                 // recheck == 0 → manual-only: DORMANT never auto-connects. Only a
                 // Wake/command (which moves us to IDLE) leaves DORMANT — EXCEPT
-                // while confirming a Park's outcome (see _confirm_arrival), or a
+                // while confirming a Park's outcome (see _confirm_arrival), a
                 // one-shot lost-contact recheck (see arm_lost_contact_recheck),
-                // either of which reconnect once regardless of manual-only.
+                // or a one-shot post-wake-failure retry (see _wake_retry_pending)
+                // — any of which reconnect once regardless of manual-only.
                 if (s == ConnState::DORMANT && _idle_recheck_ms == 0 &&
-                    !_confirm_arrival.load() && !_lost_contact_recheck.load()) continue;
+                    !_confirm_arrival.load() && !_lost_contact_recheck.load() &&
+                    !_wake_retry_pending.load()) continue;
                 if (s == ConnState::DORMANT &&
                     (int32_t)(now - _next_attempt_ms) < 0) continue;
-                // Consume the lost-contact bonus now — whatever happens below,
-                // it's used up; a second drop must re-arm it from scratch.
+                // Consume both one-shot bonuses now — whatever happens below,
+                // they're used up; a fresh drop/wake-failure must re-arm them.
                 _lost_contact_recheck = false;
+                bool had_wake_retry = _wake_retry_pending.exchange(false);
                 bool wake = _wake_read_pending.exchange(false);
                 bool user = _user_wake.exchange(false);
                 if (do_connect_and_handshake(wake)) {
@@ -1620,6 +1637,21 @@ namespace ble_manager {
                     // live data; an automatic re-check rests as soon as it has
                     // read the mower (see the AUTHENTICATED branch).
                     _hold_until_ms = millis() + (user ? HOLD_AFTER_WAKE_MS : 0);
+                } else if (user && !had_wake_retry) {
+                    // First failure of a user-initiated wake — one automatic
+                    // retry shortly, see _wake_retry_pending's declaration.
+                    // Re-arm wake/user so the retry is a real Wake too (same
+                    // device-type "app layer wake" read, same post-connect
+                    // hold), not a plain silent reconnect.
+                    _wake_retry_pending = true;
+                    _wake_read_pending  = true;
+                    _user_wake          = true;
+                    _next_attempt_ms = millis() + WAKE_RETRY_MS;
+                    char det[80];
+                    snprintf(det, sizeof(det), "wake failed — retrying in %lus",
+                             (unsigned long)(WAKE_RETRY_MS / 1000));
+                    debug_log::write(debug_log::WARN, SRC, "%s", det);
+                    set_state(ConnState::DORMANT, det);
                 } else {
                     sleep_off("asleep");
                 }

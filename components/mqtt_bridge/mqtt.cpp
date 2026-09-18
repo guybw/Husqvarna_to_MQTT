@@ -40,6 +40,15 @@ namespace mqtt {
     static uint32_t _last_ota_check = 0;
     static bool     _ota_check_pending = true;  // fire once soon after (re)connect
     static bool     _ota_check_in_flight = false;
+    // Simple schedule editor (time + duration + 7 day switches) backing a
+    // single mower task — see arm_schedule_edit_write(). Seeded from the
+    // mower's cached schedule; edits are debounced into one write so toggling
+    // several day switches doesn't fire a write per click.
+    static uint32_t _edit_start_sec    = 6 * 3600;  // 06:00 default
+    static uint32_t _edit_duration_sec = 3600;      // 60 min default
+    static bool     _edit_days[7] = {true,true,true,true,true,false,false}; // Mon-Fri
+    static uint32_t _edit_debounce_until = 0;       // 0 = no pending write
+    static constexpr uint32_t SCHEDULE_EDIT_DEBOUNCE_MS = 3000;
     static bool     _configured = false;
     static bool     _connected  = false;
     static bool     _ever_connected = false;  // we've reached the broker at least once
@@ -76,12 +85,25 @@ namespace mqtt {
         }
     }
 
+    // Any simple-schedule-editor field changed — (re)start the debounce so a
+    // burst of edits (e.g. toggling several day switches) collapses into one
+    // write_schedule_wake_async call instead of one per field.
+    static void arm_schedule_edit_write() {
+        _edit_debounce_until = now_ms() + SCHEDULE_EDIT_DEBOUNCE_MS;
+        if (_edit_debounce_until == 0) _edit_debounce_until = 1; // avoid the 0 "none pending" sentinel
+    }
+
     // Command topic handler: "mow" | "park" | "pause" → queue_command;
     // "wake" → force_wake. Anything else ignored.
     static void on_message(const uint8_t* payload, unsigned int len) {
         char cmd[16] = {};
         uint32_t secs = 0;
         bool parsed_json = false;
+        // Simple-schedule-editor fields (action sched_start/sched_duration/
+        // sched_day) — extracted here, alongside secs, while doc is in scope.
+        char     sched_field[12] = {};
+        char     sched_day[4]    = {};
+        bool     sched_day_on    = false;
         size_t offset = 0;
         while (offset < len && (payload[offset] == ' ' || payload[offset] == '\t' ||
                payload[offset] == '\r' || payload[offset] == '\n')) {
@@ -99,6 +121,13 @@ namespace mqtt {
                     } else if (doc.containsKey("secs")) {
                         secs = doc["secs"].as<uint32_t>();
                     }
+                    if (doc.containsKey("start"))
+                        snprintf(sched_field, sizeof(sched_field), "%s", doc["start"].as<const char*>());
+                    else if (doc.containsKey("minutes"))
+                        snprintf(sched_field, sizeof(sched_field), "%lu", (unsigned long)doc["minutes"].as<uint32_t>());
+                    if (doc.containsKey("day"))
+                        snprintf(sched_day, sizeof(sched_day), "%s", doc["day"].as<const char*>());
+                    sched_day_on = doc["on"] | false;
                     parsed_json = true;
                 }
             } else {
@@ -128,6 +157,35 @@ namespace mqtt {
             // (esp_https_ota) directly, same as the web UI's button.
             debug_log::write(debug_log::INFO, SRC, "GitHub OTA triggered via MQTT");
             web_server::start_github_ota_async();
+        } else if (strcmp(cmd, "sched_start") == 0) {
+            unsigned hh = 0, mm = 0;
+            if (sscanf(sched_field, "%u:%u", &hh, &mm) == 2 && hh < 24 && mm < 60) {
+                _edit_start_sec = hh * 3600 + mm * 60;
+                arm_schedule_edit_write();
+            } else {
+                debug_log::write(debug_log::WARN, SRC,
+                    "sched_start: bad time '%s'", sched_field);
+            }
+        } else if (strcmp(cmd, "sched_duration") == 0) {
+            uint32_t minutes = (uint32_t)atoi(sched_field);
+            if (minutes > 0) {
+                _edit_duration_sec = minutes * 60;
+                arm_schedule_edit_write();
+            } else {
+                debug_log::write(debug_log::WARN, SRC, "sched_duration: bad value '%s'", sched_field);
+            }
+        } else if (strcmp(cmd, "sched_day") == 0) {
+            static const char* DOW[7] = {"Mon","Tue","Wed","Thu","Fri","Sat","Sun"};
+            bool matched = false;
+            for (int k = 0; k < 7; k++) {
+                if (strcmp(sched_day, DOW[k]) == 0) {
+                    _edit_days[k] = sched_day_on;
+                    matched = true;
+                    break;
+                }
+            }
+            if (matched) arm_schedule_edit_write();
+            else debug_log::write(debug_log::WARN, SRC, "sched_day: bad day '%s'", sched_day);
         } else if (!ble_manager::queue_command(cmd, secs)) {
             debug_log::write(debug_log::WARN, SRC,
                 "unknown MQTT cmd '%s' (use mow|park|park_indefinite|resume|pause|"
@@ -284,14 +342,15 @@ namespace mqtt {
 
     static void pub_switch(const char* obj, const char* name,
                            const char* val_tpl, const char* pl_on,
-                           const char* pl_off, const char* ent_cat = nullptr) {
+                           const char* pl_off, const char* ent_cat = nullptr,
+                           const char* stat_t = nullptr) {
         DynamicJsonDocument doc(768);
         doc["name"] = name;
         char uid[40];
         snprintf(uid, sizeof(uid), "flymo_%s_%s", _id, obj);
         doc["uniq_id"] = uid;
         doc["cmd_t"]   = _t_cmd;
-        doc["stat_t"]  = _t_state;
+        doc["stat_t"]  = stat_t ? stat_t : _t_state;
         doc["val_tpl"] = val_tpl;
         doc["pl_on"]   = pl_on;
         doc["pl_off"]  = pl_off;
@@ -352,14 +411,15 @@ namespace mqtt {
     static void pub_number(const char* obj, const char* name,
                            const char* val_tpl, const char* cmd_tpl,
                            int mn, int mx, int step, const char* unit,
-                           const char* ent_cat = nullptr) {
+                           const char* ent_cat = nullptr,
+                           const char* stat_t = nullptr) {
         DynamicJsonDocument doc(768);
         doc["name"] = name;
         char uid[40];
         snprintf(uid, sizeof(uid), "flymo_%s_%s", _id, obj);
         doc["uniq_id"] = uid;
         doc["cmd_t"]   = _t_cmd;
-        doc["stat_t"]  = _t_state;
+        doc["stat_t"]  = stat_t ? stat_t : _t_state;
         doc["val_tpl"] = val_tpl;
         doc["cmd_tpl"] = cmd_tpl;
         doc["min"]     = mn;
@@ -368,6 +428,26 @@ namespace mqtt {
         if (unit && *unit)       doc["unit_of_meas"] = unit;
         if (ent_cat && *ent_cat) doc["ent_cat"]      = ent_cat;
         pub_cfg("number", obj, doc);
+    }
+
+    // HA "time" entity: a native HH:MM:SS picker. Without a template HA sends
+    // the raw picked time straight to cmd_t; cmd_tpl here wraps it into our
+    // shared JSON action-dispatch shape ({{ value }} = the picked "HH:MM:SS").
+    static void pub_time(const char* obj, const char* name,
+                        const char* val_tpl, const char* cmd_tpl,
+                        const char* stat_t, const char* ent_cat = nullptr) {
+        DynamicJsonDocument doc(768);
+        doc["name"] = name;
+        char uid[40];
+        snprintf(uid, sizeof(uid), "flymo_%s_%s", _id, obj);
+        doc["uniq_id"] = uid;
+        doc["cmd_t"]   = _t_cmd;
+        doc["stat_t"]  = stat_t;
+        doc["val_tpl"] = val_tpl;
+        doc["cmd_tpl"] = cmd_tpl;
+        doc["avty_t"]  = _t_avail;
+        if (ent_cat && *ent_cat) doc["ent_cat"] = ent_cat;
+        pub_cfg("time", obj, doc);
     }
 
     // HA "text" entity: shows stat_t's raw payload and lets the user type a
@@ -516,6 +596,42 @@ namespace mqtt {
         // schedule with many distinct time blocks still needs the web UI editor.
         pub_text("schedule_edit", "Schedule (JSON)", _t_sched, _t_sched_set,
             255, "config");
+        // Simple schedule editor for the common case (one recurring time
+        // block across some days of the week, exactly what this mower has) —
+        // native HA pickers/toggles instead of hand-editing JSON. All three
+        // share the _t_cmd action-dispatch (sched_start/sched_duration/
+        // sched_day in on_message) and are debounced into one write — see
+        // arm_schedule_edit_write(). Represents/overwrites the mower's WHOLE
+        // schedule as a single task, same as the JSON box above; anyone who
+        // wants several distinct time blocks still needs that JSON box.
+        pub_time("sched_start", "Schedule start time",
+            "{{ value_json.edit_start | default('06:00:00') }}",
+            "{\"action\":\"sched_start\",\"start\":\"{{ value }}\"}",
+            _t_sched, "config");
+        pub_number("sched_duration", "Schedule duration",
+            "{{ value_json.edit_duration_min | default(60) }}",
+            "{\"action\":\"sched_duration\",\"minutes\":{{ value | int }}}",
+            5, 1092, 5, "min", "config", _t_sched);
+        {
+            static const char* DAY_OBJ[7]  = {"sched_mon","sched_tue","sched_wed",
+                                              "sched_thu","sched_fri","sched_sat","sched_sun"};
+            static const char* DAY_NAME[7] = {"Schedule: Monday","Schedule: Tuesday",
+                                              "Schedule: Wednesday","Schedule: Thursday",
+                                              "Schedule: Friday","Schedule: Saturday","Schedule: Sunday"};
+            static const char* DAY_KEY[7]  = {"edit_mon","edit_tue","edit_wed",
+                                              "edit_thu","edit_fri","edit_sat","edit_sun"};
+            static const char* DAY_ABBR[7] = {"Mon","Tue","Wed","Thu","Fri","Sat","Sun"};
+            for (int k = 0; k < 7; k++) {
+                char val_tpl[64], pl_on[56], pl_off[56];
+                snprintf(val_tpl, sizeof(val_tpl),
+                    "{{ 'ON' if value_json.%s else 'OFF' }}", DAY_KEY[k]);
+                snprintf(pl_on,  sizeof(pl_on),
+                    "{\"action\":\"sched_day\",\"day\":\"%s\",\"on\":true}",  DAY_ABBR[k]);
+                snprintf(pl_off, sizeof(pl_off),
+                    "{\"action\":\"sched_day\",\"day\":\"%s\",\"on\":false}", DAY_ABBR[k]);
+                pub_switch(DAY_OBJ[k], DAY_NAME[k], val_tpl, pl_on, pl_off, "config", _t_sched);
+            }
+        }
 
         // ── Diagnostics (tucked under the device's Diagnostic section) ──────
         pub_update("ota_update", "Firmware update", _t_ota, "diagnostic");
@@ -680,6 +796,15 @@ namespace mqtt {
         uint32_t count = 0;
         bool have = ble_manager::get_schedule_cache(tasks, 16, &count);
 
+        // Seed the simple editor from the mower's actual first task, unless a
+        // local edit is still pending (don't clobber an in-flight change with
+        // the stale cached value while the debounce is running).
+        if (have && count > 0 && _edit_debounce_until == 0) {
+            _edit_start_sec    = tasks[0].start;
+            _edit_duration_sec = tasks[0].duration;
+            for (int k = 0; k < 7; k++) _edit_days[k] = tasks[0].use_on[k];
+        }
+
         DynamicJsonDocument doc(2048);
         doc["count"] = have ? (int)count : 0;
         char summ[24];
@@ -702,6 +827,18 @@ namespace mqtt {
                 for (int k = 0; k < 7; k++) if (tasks[i].use_on[k]) d.add(DOW[k]);
             }
         }
+        // Simple-editor fields (see the top-of-file _edit_* comment) — a
+        // single time + duration + 7 day switches, backing exactly one task.
+        char edit_start[10];
+        snprintf(edit_start, sizeof(edit_start), "%02u:%02u:00",
+                 (unsigned)((_edit_start_sec / 3600) % 24),
+                 (unsigned)((_edit_start_sec % 3600) / 60));
+        doc["edit_start"] = edit_start;
+        doc["edit_duration_min"] = (int)(_edit_duration_sec / 60);
+        static const char* EDIT_KEYS[7] = {"edit_mon","edit_tue","edit_wed",
+                                           "edit_thu","edit_fri","edit_sat","edit_sun"};
+        for (int k = 0; k < 7; k++) doc[EDIT_KEYS[k]] = _edit_days[k];
+
         char payload[1536];
         size_t n = serializeJson(doc, payload, sizeof(payload));
         esp_mqtt_client_publish(_client, _t_sched, payload, n, 0, true);
@@ -878,6 +1015,20 @@ namespace mqtt {
             _last_ota_check = now;
             _ota_check_in_flight = true;
             xTaskCreate(ota_check_task, "ota_check", 8192, nullptr, 1, nullptr);
+        }
+        // Simple schedule editor: flush a debounced edit (time/duration/day
+        // switch) as one write, SCHEDULE_EDIT_DEBOUNCE_MS after the last field
+        // change, so a burst of edits doesn't fire a write per field.
+        if (_edit_debounce_until != 0 && (int32_t)(now - _edit_debounce_until) >= 0) {
+            _edit_debounce_until = 0;
+            ble_manager::ScheduleTask task;
+            task.start    = _edit_start_sec;
+            task.duration = _edit_duration_sec;
+            for (int k = 0; k < 7; k++) task.use_on[k] = _edit_days[k];
+            debug_log::write(debug_log::INFO, SRC,
+                "schedule editor: writing (start=%lu duration=%lu)",
+                (unsigned long)task.start, (unsigned long)task.duration);
+            ble_manager::write_schedule_wake_async(&task, 1);
         }
     }
 }
