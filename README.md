@@ -26,6 +26,12 @@ on-device web UI.
 3. Click **Connect** and select your COM port
 4. Click **Flash Firmware** and wait ~1 minute
 
+Already have a bridge running? It can update itself — see [Updating](#-updating) below.
+
+Prefer to flash manually (`esptool`, an existing tool of your own), or just want
+the raw file: **[📥 Download firmware.bin](https://github.com/guybw/Husqvarna_to_MQTT/raw/main/docs/firmware.bin)**
+— the exact same binary the web flasher above uses, always current.
+
 ## ⚙️ Configure
 
 After flashing, the ESP32 broadcasts a WiFi access point:
@@ -37,6 +43,22 @@ After flashing, the ESP32 broadcasts a WiFi access point:
    - MQTT broker address
    - Mower PIN (usually `1234`)
    - Mower MAC address (found via scan)
+
+## ⬆️ Updating
+
+Once it's running, the bridge can update itself over WiFi — no USB cable needed:
+
+- **Bridge web UI** → Update tab → **Update from GitHub**: checks
+  `docs/version.txt` on `main`, shows current → latest, one click to fetch
+  and flash `docs/firmware.bin` over HTTPS and reboot.
+- **Home Assistant**: a **Firmware update** entity shows the same
+  installed/latest versions with a one-click **Install** button, checked
+  automatically every 6 hours.
+
+Both pull the exact same file the [manual download](#-flash-firmware) link
+above points at, so all three ways of getting the firmware are always in
+sync. The old USB/browser flasher still works too — handy for a first flash,
+or if the bridge is unreachable on the network.
 
 ## ✨ Features
 
