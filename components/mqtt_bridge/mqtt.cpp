@@ -33,7 +33,7 @@ namespace mqtt {
     static char     _t_avail[64]= {};   // "<base>/availability"
     static char     _t_cmd[56]  = {};   // "<base>/cmd"
     static char     _t_sched[64]= {};   // "<base>/schedule"
-    static char     _t_sched_set[68] = {}; // "<base>/schedule/set" — HA text cmd_t
+    static char     _t_sched_set[68] = {}; // "<base>/schedule/set" — raw JSON write (not HA-discovered, see on_schedule_message)
     static char     _t_ota[56]  = {};   // "<base>/ota" — update entity stat_t
     static char     _id[16]     = {};   // mac without colons
     static uint32_t _last_pub   = 0;
@@ -452,27 +452,6 @@ namespace mqtt {
         pub_cfg("time", obj, doc);
     }
 
-    // HA "text" entity: shows stat_t's raw payload and lets the user type a
-    // replacement back to a SEPARATE cmd_t (unlike the other pub_* helpers,
-    // read and write use different topics here — the schedule JSON doesn't fit
-    // the single shared _t_cmd action-dispatch shape). max is HA's own hard
-    // ceiling (255) on a text entity's value.
-    static void pub_text(const char* obj, const char* name,
-                         const char* stat_t, const char* cmd_t,
-                         int max_len, const char* ent_cat = nullptr) {
-        DynamicJsonDocument doc(768);
-        doc["name"]    = name;
-        char uid[40];
-        snprintf(uid, sizeof(uid), "flymo_%s_%s", _id, obj);
-        doc["uniq_id"] = uid;
-        doc["stat_t"]  = stat_t;
-        doc["cmd_t"]   = cmd_t;
-        doc["max"]     = max_len;
-        doc["avty_t"]  = _t_avail;
-        if (ent_cat && *ent_cat) doc["ent_cat"] = ent_cat;
-        pub_cfg("text", obj, doc);
-    }
-
     // HA "update" entity: installed/latest version + release link, with a
     // one-click Install button. stat_t carries the full JSON payload directly
     // (installed_version/latest_version/release_url) — no val_tpl needed,
@@ -590,30 +569,34 @@ namespace mqtt {
             "else 'None' }}",
             "{{ {'Low':'collision_low','Medium':'collision_med',"
             "'High':'collision_high'}[value] }}", "config");
-        // Weekly schedule as editable JSON — mirrors exactly what /schedule
-        // publishes (paste the state, tweak times/days, submit) via a SEPARATE
-        // .../schedule/set command topic (see on_schedule_message). HA's text
-        // entity hard-caps at 255 chars, which in this shape fits ~3 tasks —
-        // plenty for the common case (this mower currently uses 1), but a
-        // schedule with many distinct time blocks still needs the web UI editor.
-        pub_text("schedule_edit", "Schedule (JSON)", _t_sched, _t_sched_set,
-            255, "config");
-        // Simple schedule editor for the common case (one recurring time
-        // block across some days of the week, exactly what this mower has) —
-        // native HA pickers/toggles instead of hand-editing JSON. All three
-        // share the _t_cmd action-dispatch (sched_start/sched_duration/
-        // sched_day in on_message) and are debounced into one write — see
-        // arm_schedule_edit_write(). Represents/overwrites the mower's WHOLE
-        // schedule as a single task, same as the JSON box above; anyone who
-        // wants several distinct time blocks still needs that JSON box.
+        // The JSON text box (pub_text schedule_edit) was dropped in favour of
+        // the native controls below — see unpub_cfg("text","schedule_edit")
+        // further down, which tells HA to delete the old entity. The
+        // .../schedule/set topic + on_schedule_message() stay alive
+        // unadvertised: still usable by hand (mosquitto_pub) for anyone
+        // scripting a multi-task schedule past what the simple editor (one
+        // task) supports — just no longer HA-discovered, since the native
+        // entities below cover the common case HA users actually have.
+        //
+        // Simple schedule editor: native HA pickers/toggles for the common
+        // case (one recurring time block across some days — what this mower
+        // has) instead of hand-editing JSON. No entity_category (nullptr) so
+        // these land in the device's main "Controls" card next to Wake/Mow/
+        // Park, not tucked under Configuration — HA has no native "Schedule"
+        // grouping, so uncategorized/Controls is the closest available.
+        // All three share the _t_cmd action-dispatch (sched_start/
+        // sched_duration/sched_day in on_message) and are debounced into one
+        // write — see arm_schedule_edit_write(). Represents/overwrites the
+        // mower's WHOLE schedule as a single task; several distinct time
+        // blocks still needs the raw .../schedule/set topic above.
         pub_time("sched_start", "Schedule start time",
             "{{ value_json.edit_start | default('06:00:00') }}",
             "{\"action\":\"sched_start\",\"start\":\"{{ value }}\"}",
-            _t_sched, "config");
+            _t_sched, nullptr);
         pub_number("sched_duration", "Schedule duration",
             "{{ value_json.edit_duration_min | default(60) }}",
             "{\"action\":\"sched_duration\",\"minutes\":{{ value | int }}}",
-            5, 1092, 5, "min", "config", _t_sched);
+            5, 1092, 5, "min", nullptr, _t_sched);
         {
             static const char* DAY_OBJ[7]  = {"sched_mon","sched_tue","sched_wed",
                                               "sched_thu","sched_fri","sched_sat","sched_sun"};
@@ -631,7 +614,7 @@ namespace mqtt {
                     "{\"action\":\"sched_day\",\"day\":\"%s\",\"on\":true}",  DAY_ABBR[k]);
                 snprintf(pl_off, sizeof(pl_off),
                     "{\"action\":\"sched_day\",\"day\":\"%s\",\"on\":false}", DAY_ABBR[k]);
-                pub_switch(DAY_OBJ[k], DAY_NAME[k], val_tpl, pl_on, pl_off, "config", _t_sched);
+                pub_switch(DAY_OBJ[k], DAY_NAME[k], val_tpl, pl_on, pl_off, nullptr, _t_sched);
             }
         }
 
@@ -702,6 +685,7 @@ namespace mqtt {
         unpub_cfg("sensor",        "board_temp");  // 20:4 mowertemp — unsupported
         unpub_cfg("binary_sensor", "upsidedown");  // 20:4 — unsupported
         unpub_cfg("sensor",        "theft");       // 4736:21 — unsupported
+        unpub_cfg("text", "schedule_edit");  // replaced by the native start/duration/day-switch entities
         debug_log::write(debug_log::INFO, SRC, "HA discovery published");
     }
 
