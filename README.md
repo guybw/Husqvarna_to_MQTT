@@ -226,18 +226,28 @@ Blade usage time · **Schedule** (summary + full task list as attributes).
 | Idle re-check interval | How often a resting mower is woken for a status read (default 60 min) |
 | Factory reset | Wipes all settings and reboots back to setup AP |
 
-### Schedule editor
+### Schedule editor — web UI and Home Assistant
 
-The web UI includes a **schedule editor** (under the Schedule section once logged
-in). Click **Load schedule** to pull the mower's current weekly plan, edit the
-per-day start times and durations in the table (up to 16 tasks, durations up to
-1092 min), then **Save to mower** to write the whole schedule back over BLE. This
-is the one piece of mower behaviour you can't easily set from the official app
-once it's bonded to the bridge.
+**Web UI** (Mower tab → Schedule, once logged in): click **Load schedule** to
+pull the mower's current weekly plan, edit per-day start times and durations
+in the table (up to 16 tasks, durations up to 1092 min), then **Save to
+mower** to write the whole schedule back over BLE. This is the one piece of
+mower behaviour you can't easily set from the official app once it's bonded
+to the bridge, and the only place to edit a schedule with several genuinely
+different time blocks.
 
-## 🚧 Known Issues
+**Home Assistant**: for the common case — one recurring time block across
+some days of the week — native controls appear right on the device page
+alongside Wake/Mow/Park: a start-time picker, a duration number, and a
+switch per day. Editing several of them (e.g. toggling a few days) debounces
+into a single write a few seconds after your last change, so it doesn't
+spam the mower with one BLE write per click. These represent/overwrite the
+mower's whole schedule as a single task — the same limit as the "one task"
+case in the web editor — so several distinct time blocks still need the web
+UI above.
 
-- **Schedule is web-UI only** — the schedule editor lives in the on-device web UI, not in MQTT/Home Assistant. View and edit the weekly plan from the bridge's web page; it isn't exposed as an HA control.
+Both write the same schedule on the mower and read back from the same
+cache, so they always stay in sync with each other and with the official app.
 
 ---
 
@@ -250,4 +260,6 @@ This project builds on the excellent work of the open-source community:
 
 ---
 
-**Version:** 0.23.0-dev | **Framework:** native ESP-IDF | **License:** GPL-3.0-or-later | [GitHub](https://github.com/guybw/Husqvarna_to_MQTT)
+**Framework:** native ESP-IDF | **License:** GPL-3.0-or-later | [GitHub](https://github.com/guybw/Husqvarna_to_MQTT)
+
+Current firmware version: see `docs/version.txt`, or the bridge's own Status tab once flashed — kept current automatically, unlike a hardcoded number here.
