@@ -230,6 +230,21 @@ namespace ble_manager {
     static constexpr uint32_t    CONFIRM_MAX_MS     = 15UL * 60UL * 1000UL; // 15 min cap
     static constexpr uint32_t    CONFIRM_RECHECK_MS = 90000;                // reconnect 90 s after a drop
 
+    // ── "Lost contact while active" one-shot recheck ─────────────────────
+    // If the link drops (unexpectedly, or 3 failed polls) while the last known
+    // reading was NOT a benign rest — mowing/paused/errored — and idle_recheck
+    // is set to manual-only, we'd otherwise go fully silent until the user
+    // notices and presses Wake (see the 2026-09-18 "stuck outside the working
+    // area for hours" incident). Arm exactly one bonus reconnect attempt
+    // LOST_CONTACT_RECHECK_MS later to see if it made it home on its own.
+    // Consumed (cleared) the moment ANY reconnect attempt actually runs, so it
+    // never fires more than once per drop — if that attempt also fails, we go
+    // back to silent/manual-only. The "Needs attention" MQTT sensor (see
+    // get_mower_status) is the real notification path; this is just a bonus
+    // chance at auto-recovery, independent of whether it succeeds.
+    static std::atomic<bool>     _lost_contact_recheck(false);
+    static constexpr uint32_t    LOST_CONTACT_RECHECK_MS = 15UL * 60UL * 1000UL; // 15 min
+
     // ── Pending command (0=none, 1=mow, 2=park, 3=pause) ─────────────────
     static std::atomic<uint8_t>  _pending_cmd(0);
     static std::atomic<uint32_t> _pending_cmd_secs(0);
@@ -242,6 +257,8 @@ namespace ble_manager {
     // Forward decls
     static int gap_event_cb(struct ble_gap_event* event, void* arg);
     static void start_scan_internal();
+    static bool mower_is_benign_resting();
+    static void arm_lost_contact_recheck();
 
     // ═════════════════════════════════════════════════════════════════════
     // UUID helpers — native ble_uuid128_t stores bytes REVERSED vs the dashed
@@ -1030,9 +1047,12 @@ namespace ble_manager {
                 set_state(ConnState::DORMANT, "confirming outcome — re-check shortly");
             } else {
                 // Unexpected drop (mower slept mid-session / link lost). Leave
-                // the mower alone and re-check on the long interval.
+                // the mower alone and re-check on the long interval — unless the
+                // last known reading wasn't benign, in which case arm one bonus
+                // check sooner (see arm_lost_contact_recheck).
                 _confirm_arrival = false;
                 _next_attempt_ms = millis() + _idle_recheck_ms;
+                arm_lost_contact_recheck();
                 char det[64];
                 recheck_detail(det, sizeof(det), "disconnected");
                 set_state(ConnState::DORMANT, det);
@@ -1482,6 +1502,18 @@ namespace ble_manager {
         return act_ok && st_ok;
     }
 
+    // Call right after scheduling a DORMANT re-check for an unexpected drop
+    // (unexpected disconnect, or 3 failed polls). If idle_recheck is manual-only
+    // AND the last known reading wasn't a benign rest, override the "wait
+    // forever" schedule with exactly one bonus attempt in
+    // LOST_CONTACT_RECHECK_MS — see the declaration comment for why.
+    static void arm_lost_contact_recheck() {
+        if (_idle_recheck_ms != 0) return;      // auto-recheck already covers it
+        if (mower_is_benign_resting()) return;  // ordinary sleep — nothing to do
+        _lost_contact_recheck = true;
+        _next_attempt_ms = millis() + LOST_CONTACT_RECHECK_MS;
+    }
+
     // Read the mower's own clock (GetTime 4690:2, uint32). Used to convert the
     // absolute next-start timestamp into a wake delay without needing the
     // ESP32's wall clock. Returns false if unavailable.
@@ -1571,12 +1603,16 @@ namespace ble_manager {
                 if (_scanning) continue;
                 // recheck == 0 → manual-only: DORMANT never auto-connects. Only a
                 // Wake/command (which moves us to IDLE) leaves DORMANT — EXCEPT
-                // while confirming a Park's outcome (see _confirm_arrival), where
-                // we reconnect until the mower settles home.
+                // while confirming a Park's outcome (see _confirm_arrival), or a
+                // one-shot lost-contact recheck (see arm_lost_contact_recheck),
+                // either of which reconnect once regardless of manual-only.
                 if (s == ConnState::DORMANT && _idle_recheck_ms == 0 &&
-                    !_confirm_arrival.load()) continue;
+                    !_confirm_arrival.load() && !_lost_contact_recheck.load()) continue;
                 if (s == ConnState::DORMANT &&
                     (int32_t)(now - _next_attempt_ms) < 0) continue;
+                // Consume the lost-contact bonus now — whatever happens below,
+                // it's used up; a second drop must re-arm it from scratch.
+                _lost_contact_recheck = false;
                 bool wake = _wake_read_pending.exchange(false);
                 bool user = _user_wake.exchange(false);
                 if (do_connect_and_handshake(wake)) {
@@ -1742,6 +1778,7 @@ namespace ble_manager {
                         _poll_fail = 0;
                     } else if (++_poll_fail >= POLL_FAIL_LIMIT) {
                         _next_attempt_ms = millis() + _idle_recheck_ms;
+                        arm_lost_contact_recheck();
                         _rest_pending = true;
                         char det[64];
                         recheck_detail(det, sizeof(det), "mower slept");
@@ -2106,6 +2143,34 @@ namespace ble_manager {
         return _write_schedule(tasks, count);
     }
 
+    // Async version of write_schedule_wake for callers that must not block —
+    // the MQTT schedule "text" entity's command handler runs on esp-mqtt's own
+    // task, and write_schedule_wake can take up to ~45 s. Copies the tasks
+    // (caller's buffer may be stack/short-lived) and does the actual write on
+    // a one-shot task.
+    struct ScheduleWriteArgs { ScheduleTask tasks[16]; uint32_t count; };
+
+    static void schedule_write_task(void* arg) {
+        auto* a = (ScheduleWriteArgs*)arg;
+        bool ok = write_schedule_wake(a->tasks, a->count);
+        debug_log::write(ok ? debug_log::INFO : debug_log::WARN, SRC,
+            "async schedule write (%lu task%s) %s", (unsigned long)a->count,
+            a->count == 1 ? "" : "s", ok ? "OK" : "failed");
+        free(a);
+        vTaskDelete(nullptr);
+    }
+
+    void write_schedule_wake_async(const ScheduleTask* tasks, uint32_t count) {
+        if (count > 16) count = 16;
+        auto* a = (ScheduleWriteArgs*)malloc(sizeof(ScheduleWriteArgs));
+        if (!a) return;
+        a->count = count;
+        for (uint32_t i = 0; i < count; i++) a->tasks[i] = tasks[i];
+        // Matches conn_task's own stack size (6144) — write_schedule_wake calls
+        // the same BLE query/write machinery conn_task_fn runs with.
+        xTaskCreate(schedule_write_task, "sched_wr", 6144, a, 5, nullptr);
+    }
+
     bool get_schedule_cache(ScheduleTask* out, uint32_t max_out, uint32_t* out_count) {
         if (!out || !out_count || !_sched_valid) return false;
         uint32_t n = _sched_count < max_out ? _sched_count : max_out;
@@ -2127,6 +2192,14 @@ namespace ble_manager {
             st.rssi = 0;
         }
         strncpy(st.detail, _state_detail, sizeof(st.detail));
+        // "Needs attention": we've gone quiet (DORMANT) but the last thing we
+        // knew about the mower wasn't a benign rest — it was mowing, paused, or
+        // sitting on an unresolved fault when contact was lost. A drop while
+        // genuinely resting (enter_rest()) only happens when
+        // mower_is_benign_resting() was already true, so this can't misfire on
+        // an ordinary sleep.
+        st.needs_help = (st.state == ConnState::DORMANT && _mower_state >= 0 &&
+                          !mower_is_benign_resting()) ? 1 : 0;
         st.mower_state    = _mower_state;
         st.mower_activity = _mower_activity;
         st.mower_battery  = _mower_battery;

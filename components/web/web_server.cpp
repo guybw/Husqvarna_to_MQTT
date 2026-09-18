@@ -16,6 +16,9 @@
 
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"
+#include "esp_https_ota.h"
+#include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
@@ -815,6 +818,128 @@ namespace web_server {
         return send_ok(req, "{\"ok\":true}");
     }
 
+    // ── OTA: fetch from GitHub (docs/ on main — same files the web flasher
+    // uses) ────────────────────────────────────────────────────────────────
+    static constexpr char GITHUB_VERSION_URL[] =
+        "https://raw.githubusercontent.com/guybw/Husqvarna_to_MQTT/main/docs/version.txt";
+    static constexpr char GITHUB_FIRMWARE_URL[] =
+        "https://raw.githubusercontent.com/guybw/Husqvarna_to_MQTT/main/docs/firmware.bin";
+
+    bool check_github_version(char* out, size_t out_len, int* out_status) {
+        if (out_status) *out_status = 0;
+        if (!out || out_len == 0) return false;
+        out[0] = '\0';
+        esp_http_client_config_t cfg = {};
+        cfg.url               = GITHUB_VERSION_URL;
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        cfg.timeout_ms        = 8000;
+        esp_http_client_handle_t client = esp_http_client_init(&cfg);
+        if (!client) return false;
+        esp_err_t err = esp_http_client_open(client, 0);
+        if (err != ESP_OK) {
+            debug_log::write(debug_log::WARN, SRC,
+                "GitHub version check: connect failed (%s)", esp_err_to_name(err));
+            esp_http_client_cleanup(client);
+            return false;
+        }
+        esp_http_client_fetch_headers(client);
+        int status = esp_http_client_get_status_code(client);
+        if (out_status) *out_status = status;
+        char buf[32] = {0};
+        int n = status == 200 ? esp_http_client_read(client, buf, sizeof(buf) - 1) : -1;
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        if (n <= 0) {
+            debug_log::write(debug_log::WARN, SRC,
+                "GitHub version check: HTTP %d", status);
+            return false;
+        }
+        buf[n] = '\0';
+        // Trim trailing whitespace/newline.
+        while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' '))
+            buf[--n] = '\0';
+        if (n == 0 || (size_t)n >= out_len) return false;
+        memcpy(out, buf, n + 1);
+        return true;
+    }
+
+    // Blocking: suspend BLE, download+flash docs/firmware.bin, reboot on
+    // success. Mirrors h_ota_post's BLE-suspend/post_ota/reboot handling, but
+    // esp_https_ota() does the download+esp_ota_begin/write/end/set_boot_partition
+    // sequence itself instead of the manual-upload multipart parser below.
+    static bool perform_github_ota() {
+        ble_manager::suspend();
+        vTaskDelay(pdMS_TO_TICKS(200));
+
+        esp_http_client_config_t http_cfg = {};
+        http_cfg.url               = GITHUB_FIRMWARE_URL;
+        http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        http_cfg.timeout_ms        = 30000;
+        http_cfg.keep_alive_enable = true;
+        esp_https_ota_config_t ota_cfg = {};
+        ota_cfg.http_config = &http_cfg;
+
+        debug_log::write(debug_log::INFO, SRC, "GitHub OTA: downloading %s",
+                         GITHUB_FIRMWARE_URL);
+        esp_err_t err = esp_https_ota(&ota_cfg);
+        if (err != ESP_OK) {
+            debug_log::write(debug_log::ERROR, SRC,
+                "GitHub OTA failed (%s) — BLE stays suspended until reboot",
+                esp_err_to_name(err));
+            return false;
+        }
+
+        debug_log::write(debug_log::INFO, SRC, "GitHub OTA flash OK — restarting");
+        // NimBLE panics on the first boot after an OTA soft-reset; force one
+        // extra clean reboot before BLE init (same as the manual-upload path).
+        settings::set_post_ota(1);
+        schedule_restart(1000);
+        return true;
+    }
+
+    static void github_ota_task(void*) {
+        perform_github_ota();
+        vTaskDelete(nullptr);
+    }
+
+    void start_github_ota_async() {
+        // TLS handshake + esp_https_ota's own buffers are stack-hungry; 8 KB
+        // matches ESP-IDF's own https_ota examples' task stack sizing.
+        xTaskCreate(github_ota_task, "gh_ota", 8192, nullptr, 5, nullptr);
+    }
+
+    static esp_err_t h_ota_check_get(httpd_req_t* req) {
+        char latest[32];
+        char buf[160];
+        int status = 0;
+        if (check_github_version(latest, sizeof(latest), &status)) {
+            bool avail = strcmp(latest, FIRMWARE_VERSION) != 0;
+            snprintf(buf, sizeof(buf), "{\"current\":\"%s\",\"latest\":\"%s\",\"update_available\":%s}",
+                     FIRMWARE_VERSION, latest, avail ? "true" : "false");
+            return send_ok(req, buf);
+        }
+        // Distinguish "couldn't reach GitHub at all" (status 0 — DNS/TLS/network)
+        // from a real HTTP error (most likely 404: docs/version.txt isn't on the
+        // main branch yet, i.e. nothing's been pushed) so the UI doesn't wrongly
+        // suggest a connectivity problem when the device reached GitHub just fine.
+        if (status == 0) {
+            snprintf(buf, sizeof(buf), "{\"error\":\"could not reach GitHub (network/DNS/TLS)\"}");
+        } else if (status == 404) {
+            snprintf(buf, sizeof(buf),
+                "{\"error\":\"GitHub returned 404 for docs/version.txt — has it been pushed to main yet?\"}");
+        } else {
+            snprintf(buf, sizeof(buf), "{\"error\":\"GitHub returned HTTP %d\"}", status);
+        }
+        return send_json(req, "502 Bad Gateway", buf);
+    }
+
+    static esp_err_t h_ota_github_post(httpd_req_t* req) {
+        if (!guard(req)) return ESP_OK;
+        debug_log::write(debug_log::INFO, SRC, "GitHub OTA triggered from web UI");
+        start_github_ota_async();
+        return send_ok(req, "{\"ok\":true,\"msg\":\"update started\"}");
+    }
+
     // ── OTA: raw firmware body → esp_ota ─────────────────────────────────
     static esp_err_t h_ota_post(httpd_req_t* req) {
         if (!guard(req)) return ESP_OK;
@@ -1138,6 +1263,8 @@ namespace web_server {
         reg("/api/wifi",                 HTTP_POST, h_wifi_post);
         reg("/api/admin",                HTTP_POST, h_admin_post);
         reg("/api/ota",                  HTTP_POST, h_ota_post);
+        reg("/api/ota/check",            HTTP_GET,  h_ota_check_get);
+        reg("/api/ota/github",           HTTP_POST, h_ota_github_post);
         reg("/api/debug/stream",         HTTP_GET,  h_sse);
 
         // 404 / captive-portal fallback

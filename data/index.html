@@ -86,6 +86,18 @@
       <span id="ble-status" style="font-size:.85rem;margin-left:.6rem;opacity:.7;"></span>
     </p>
     <ul id="ble-list"></ul>
+    <div style="margin-top:.8rem;padding-top:.8rem;border-top:1px solid rgba(128,128,128,.25);">
+      <p id="maint-status" style="margin:.2rem 0;"></p>
+      <p style="font-size:.85rem;opacity:.7;margin:.2rem 0 .6rem;max-width:34rem;">
+        The mower only accepts one Bluetooth connection at a time. Turn this
+        off to free it up — e.g. to use the official Husqvarna/Flymo app for a
+        bit — then turn it back on here when you're done so the bridge
+        resumes. Also usable before a browser firmware upload, though the
+        bridge already pauses Bluetooth automatically during an OTA either way.
+      </p>
+      <button id="maint-btn" onclick="toggleMaintenance()">…</button>
+      <span class="msg" id="maint-msg" style="margin-left:.6rem;"></span>
+    </div>
   </section>
   <button onclick="loadInfo()">Refresh</button>
   &nbsp;
@@ -305,23 +317,24 @@
 <!-- UPDATE TAB -->
 <div id="update" class="tab-pane">
   <section>
-    <h2>Web Flashing Mode</h2>
-    <p id="maint-status" style="margin:.4rem 0;"></p>
+    <h2>Update from GitHub</h2>
     <p style="font-size:.85rem;opacity:.7;margin:.2rem 0 .6rem;">
-      Enable this before uploading firmware from the browser. Bluetooth will be
-      disabled after reboot so the device can accept the OTA flash safely.
-      Re-enable it when you are finished.
+      Fetches <code>docs/firmware.bin</code> straight from the project's GitHub
+      <code>main</code> branch over HTTPS and flashes it — no download/upload
+      round-trip needed.
     </p>
-    <button id="maint-btn" onclick="toggleMaintenance()">…</button>
-    <span class="msg" id="maint-msg" style="margin-left:.6rem;"></span>
+    <p id="ghota-status" style="margin:.4rem 0;">—</p>
+    <button id="ghota-check-btn" onclick="checkGithubUpdate()">Check for update</button>
+    <button id="ghota-btn" onclick="startGithubOta()" style="display:none;color:#000;border-color:#4a4;">Update now</button>
+    <span class="msg" id="ghota-msg" style="margin-left:.6rem;"></span>
   </section>
   <section>
-    <h2>Firmware OTA</h2>
+    <h2>Firmware OTA (manual upload)</h2>
     <p>Select the firmware binary and upload. The web UI is bundled into the
        firmware — a single <code>firmware.bin</code> is the only file needed.</p>
     <p style="font-size:.85rem;opacity:.7;margin:.2rem 0 .6rem;">
-      If you are flashing from the browser, enable Web Flashing Mode first,
-      then upload the firmware binary and allow the device to reboot.
+      Bluetooth on/off has moved to the Status tab. The bridge already pauses
+      it automatically during a flash either way, so it isn't required here.
     </p>
     <label><span>Firmware file (.bin)</span>
       <input type="file" id="ota-file" accept=".bin"></label>
@@ -366,12 +379,12 @@ function showTab(id) {
   if (pane) pane.classList.add('active');
   var link = document.querySelector('.tab-link[href="#' + id + '"]');
   if (link) link.classList.add('active');
-  if (id === 'status') { loadInfo(); loadBle(); startBleAutoRefresh(); }
+  if (id === 'status') { loadInfo(); loadBle(); startBleAutoRefresh(); loadMaintenance(); }
   else                 { stopBleAutoRefresh(); }
   if (id === 'mower')  { startMowerAutoRefresh(); }
   else                 { stopMowerAutoRefresh(); }
   if (id === 'pair')   { loadMowerStatus(); }
-  if (id === 'update') { loadMaintenance(); }
+  if (id === 'update') { checkGithubUpdate(); }
   if (id === 'setup')  { loadSetup(); }
   if (id === 'debug' && !_evtSource) connectLog();
 }
@@ -406,12 +419,12 @@ function loadMaintenance() {
   fetch('/api/system/maintenance')
     .then(function(r){ return r.json(); })
     .then(function(j) {
-      var on = j.maintenance;
+      var on = j.maintenance;   // maintenance mode active == Bluetooth disabled
       document.getElementById('maint-status').textContent = on
-        ? 'ACTIVE — Bluetooth is disabled.' : 'Off — Bluetooth running normally.';
+        ? 'Bluetooth is OFF.' : 'Bluetooth is ON — running normally.';
       document.getElementById('maint-status').style.color = on ? '#e05050' : '#4a4';
       var btn = document.getElementById('maint-btn');
-      btn.textContent = on ? 'Disable maintenance mode' : 'Enable maintenance mode';
+      btn.textContent = on ? 'Turn Bluetooth on' : 'Turn Bluetooth off';
       btn.style.color = on ? '' : '#e8a000';
       btn.style.borderColor = on ? '' : '#e8a000';
       btn._maintOn = on;
@@ -440,7 +453,7 @@ function toggleMaintenance() {
   var btn = document.getElementById('maint-btn');
   var msg = document.getElementById('maint-msg');
   var enable = !btn._maintOn;
-  if (enable && !confirm('Enable maintenance mode?\n\nBluetooth will be disabled after reboot. Use this when OTA-flashing. Re-enable when done.')) return;
+  if (enable && !confirm('Turn Bluetooth off?\n\nThe mower only accepts one Bluetooth connection at a time, so this frees it up — e.g. to use the official app. Takes effect after a quick reboot. Turn it back on here when you\'re done so the bridge resumes.')) return;
   msg.textContent = 'Saving…';
   fetch('/api/system/maintenance', {method:'POST',
                       body: new URLSearchParams({enable: enable ? '1' : '0'})})
@@ -719,6 +732,43 @@ function pollScan() {
 }
 
 // ---- Update: OTA upload ----
+// ---- Update tab: GitHub OTA ----
+function checkGithubUpdate() {
+  var status = document.getElementById('ghota-status');
+  var msg    = document.getElementById('ghota-msg');
+  var btn    = document.getElementById('ghota-btn');
+  status.textContent = 'Checking…';
+  msg.textContent = '';
+  fetch('/api/ota/check')
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      if (j.error) { status.textContent = j.error; btn.style.display = 'none'; return; }
+      if (j.update_available) {
+        status.textContent = 'Update available: ' + j.current + ' → ' + j.latest;
+        btn.style.display = '';
+      } else {
+        status.textContent = 'Up to date (' + j.current + ').';
+        btn.style.display = 'none';
+      }
+    })
+    .catch(function(){ status.textContent = 'Check failed — is the bridge online?'; btn.style.display = 'none'; });
+}
+
+function startGithubOta() {
+  if (!confirm('Download and flash the latest firmware from GitHub now?\n\nThe device will reboot when done (~30-60 s).')) return;
+  var btn = document.getElementById('ghota-btn');
+  var msg = document.getElementById('ghota-msg');
+  btn.disabled = true;
+  msg.textContent = 'Started — downloading & flashing on the device, this page will stop responding shortly.';
+  fetch('/api/ota/github', {method:'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(j) {
+      if (!j.ok) { msg.textContent = 'Error: ' + (j.error || 'failed to start'); btn.disabled = false; return; }
+      setTimeout(function(){ location.reload(); }, 45000);
+    })
+    .catch(function(){ msg.textContent = 'Started (network reply lost — that\'s expected once the device reboots).'; });
+}
+
 function startOta() {
   var fileInput = document.getElementById('ota-file');
   var msg       = document.getElementById('ota-msg');

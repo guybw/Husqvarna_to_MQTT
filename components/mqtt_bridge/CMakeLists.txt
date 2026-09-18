@@ -5,5 +5,5 @@
 idf_component_register(
     SRCS "mqtt.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES core net ble espressif__mqtt esp_timer
+    REQUIRES core net ble web espressif__mqtt esp_timer
 )

@@ -33,6 +33,9 @@ namespace ble_manager {
         char      name[64];
         int8_t    rssi;
         char      detail[80]; // human-readable state detail
+        int8_t    needs_help;      // 1 = lost contact (DORMANT) while the last
+                                    // known state wasn't benign rest — mowing,
+                                    // paused, or an unresolved fault. Always 0/1.
         int16_t   mower_state;    // MowerState enum; -1 = not yet polled
         int16_t   mower_activity; // MowerActivity enum; -1 = not yet polled
         int16_t   mower_battery;  // 0-100 %; -1 = not yet polled
@@ -109,6 +112,9 @@ namespace ble_manager {
     // Like write_schedule but wakes the mower first if it is asleep (blocks the
     // caller up to ~45 s waiting for the link). For the web Save handler.
     bool write_schedule_wake(const ScheduleTask* tasks, uint32_t count);
+    // Same, but returns immediately and does the (up to ~45 s) write on a
+    // spawned task. For callers that must not block — e.g. the MQTT event task.
+    void write_schedule_wake_async(const ScheduleTask* tasks, uint32_t count);
 
     // Last schedule read from the mower while connected (cached; no BLE I/O).
     // Returns false if nothing has been cached yet. Safe to call from any task.

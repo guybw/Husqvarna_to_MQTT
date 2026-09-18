@@ -6,11 +6,13 @@
 // event handler. The HA discovery payloads and the state JSON are byte-for-byte
 // identical to the Arduino reference.
 #include "mqtt.h"
+#include "config.h"
 #include "settings.h"
 #include "debug_log.h"
 #include "wifi_manager.h"
 #include "ble_manager.h"
 #include "automower_protocol.h"
+#include "web_server.h"
 #include "mqtt_client.h"
 #include "esp_timer.h"
 #include <ArduinoJson.h>
@@ -29,8 +31,12 @@ namespace mqtt {
     static char     _t_avail[64]= {};   // "<base>/availability"
     static char     _t_cmd[56]  = {};   // "<base>/cmd"
     static char     _t_sched[64]= {};   // "<base>/schedule"
+    static char     _t_sched_set[68] = {}; // "<base>/schedule/set" — HA text cmd_t
+    static char     _t_ota[56]  = {};   // "<base>/ota" — update entity stat_t
     static char     _id[16]     = {};   // mac without colons
     static uint32_t _last_pub   = 0;
+    static uint32_t _last_ota_check = 0;
+    static bool     _ota_check_pending = true;  // fire once soon after (re)connect
     static bool     _configured = false;
     static bool     _connected  = false;
     static bool     _ever_connected = false;  // we've reached the broker at least once
@@ -48,6 +54,9 @@ namespace mqtt {
     // before forcing it. Covers the normal reconnect; only a wedged client (dead
     // half-open socket, or a new DHCP IP after a router reboot) needs the nudge.
     static constexpr uint32_t MQTT_WIFI_REGAIN_GRACE_MS = 15000;
+    // How often to re-check GitHub for a newer firmware version. Infrequent —
+    // it's a blocking HTTPS request run inline in loop() (fine at this cadence).
+    static constexpr uint32_t OTA_CHECK_MS = 6UL * 60UL * 60UL * 1000UL; // 6 h
 
     static uint32_t now_ms() { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -108,11 +117,84 @@ namespace mqtt {
             secs ? " (duration)" : "");
         if (strcmp(cmd, "wake") == 0) {
             ble_manager::force_wake();
+        } else if (strcmp(cmd, "ota_github") == 0) {
+            // payload_install of the "update" entity — not a BLE command, so it
+            // doesn't go through queue_command; starts the async GitHub OTA
+            // (esp_https_ota) directly, same as the web UI's button.
+            debug_log::write(debug_log::INFO, SRC, "GitHub OTA triggered via MQTT");
+            web_server::start_github_ota_async();
         } else if (!ble_manager::queue_command(cmd, secs)) {
             debug_log::write(debug_log::WARN, SRC,
                 "unknown MQTT cmd '%s' (use mow|park|park_indefinite|resume|pause|"
-                "clear_error|wake or JSON action)", cmd);
+                "clear_error|wake|ota_github or JSON action)", cmd);
         }
+    }
+
+    // Command handler for the schedule "text" entity's cmd_t. Payload matches
+    // the exact shape publish_schedule() emits below — {"tasks":[{"start":
+    // "HH:MM","duration_min":N,"days":["Mon",...]}]} or a bare tasks array —
+    // so pasting the current state back and tweaking it round-trips cleanly.
+    static void on_schedule_message(const uint8_t* payload, unsigned int len) {
+        static const char* DOW[7] = {"Mon","Tue","Wed","Thu","Fri","Sat","Sun"};
+        DynamicJsonDocument doc(1536);
+        auto err = deserializeJson(doc, payload, len);
+        if (err) {
+            debug_log::write(debug_log::WARN, SRC,
+                "invalid MQTT schedule JSON: %s", err.c_str());
+            return;
+        }
+        JsonArray arr;
+        if (doc.containsKey("tasks") && doc["tasks"].is<JsonArray>())
+            arr = doc["tasks"].as<JsonArray>();
+        else if (doc.is<JsonArray>())
+            arr = doc.as<JsonArray>();
+        else {
+            debug_log::write(debug_log::WARN, SRC, "MQTT schedule: no tasks array");
+            return;
+        }
+        if (arr.size() > 16) {
+            debug_log::write(debug_log::WARN, SRC, "MQTT schedule: max 16 tasks");
+            return;
+        }
+        ble_manager::ScheduleTask tasks[16];
+        uint32_t count = 0;
+        for (JsonVariant item : arr) {
+            if (!item.is<JsonObject>()) continue;
+            JsonObject t = item.as<JsonObject>();
+            const char* hhmm = t["start"] | "";
+            unsigned hh = 0, mm = 0;
+            if (sscanf(hhmm, "%u:%u", &hh, &mm) != 2 || hh > 23 || mm > 59) {
+                debug_log::write(debug_log::WARN, SRC,
+                    "MQTT schedule: bad start '%s' — write aborted", hhmm);
+                return;
+            }
+            uint32_t dur_min = t["duration_min"] | 0;
+            if (dur_min == 0) {
+                debug_log::write(debug_log::WARN, SRC,
+                    "MQTT schedule: missing/zero duration_min — write aborted");
+                return;
+            }
+            ble_manager::ScheduleTask& task = tasks[count];
+            task.start    = hh * 3600 + mm * 60;
+            task.duration = dur_min * 60;
+            for (int k = 0; k < 7; k++) task.use_on[k] = false;
+            if (t.containsKey("days") && t["days"].is<JsonArray>()) {
+                for (JsonVariant dv : t["days"].as<JsonArray>()) {
+                    const char* d = dv.as<const char*>();
+                    if (!d) continue;
+                    for (int k = 0; k < 7; k++)
+                        if (strcmp(d, DOW[k]) == 0) task.use_on[k] = true;
+                }
+            }
+            count++;
+        }
+        if (count == 0) {
+            debug_log::write(debug_log::WARN, SRC, "MQTT schedule: no valid tasks parsed");
+            return;
+        }
+        debug_log::write(debug_log::INFO, SRC,
+            "MQTT schedule write: %lu task(s), waking mower…", (unsigned long)count);
+        ble_manager::write_schedule_wake_async(tasks, count);
     }
 
     // ── HA discovery helpers ───────────────────────────────────────────────
@@ -283,6 +365,48 @@ namespace mqtt {
         pub_cfg("number", obj, doc);
     }
 
+    // HA "text" entity: shows stat_t's raw payload and lets the user type a
+    // replacement back to a SEPARATE cmd_t (unlike the other pub_* helpers,
+    // read and write use different topics here — the schedule JSON doesn't fit
+    // the single shared _t_cmd action-dispatch shape). max is HA's own hard
+    // ceiling (255) on a text entity's value.
+    static void pub_text(const char* obj, const char* name,
+                         const char* stat_t, const char* cmd_t,
+                         int max_len, const char* ent_cat = nullptr) {
+        DynamicJsonDocument doc(768);
+        doc["name"]    = name;
+        char uid[40];
+        snprintf(uid, sizeof(uid), "flymo_%s_%s", _id, obj);
+        doc["uniq_id"] = uid;
+        doc["stat_t"]  = stat_t;
+        doc["cmd_t"]   = cmd_t;
+        doc["max"]     = max_len;
+        doc["avty_t"]  = _t_avail;
+        if (ent_cat && *ent_cat) doc["ent_cat"] = ent_cat;
+        pub_cfg("text", obj, doc);
+    }
+
+    // HA "update" entity: installed/latest version + release link, with a
+    // one-click Install button. stat_t carries the full JSON payload directly
+    // (installed_version/latest_version/release_url) — no val_tpl needed,
+    // that's the platform's own default schema. payload_install re-uses the
+    // shared _t_cmd action dispatch (on_message handles "ota_github").
+    static void pub_update(const char* obj, const char* name,
+                           const char* stat_t, const char* ent_cat = nullptr) {
+        DynamicJsonDocument doc(768);
+        doc["name"]    = name;
+        char uid[40];
+        snprintf(uid, sizeof(uid), "flymo_%s_%s", _id, obj);
+        doc["uniq_id"]  = uid;
+        doc["stat_t"]   = stat_t;
+        doc["cmd_t"]    = _t_cmd;
+        doc["payload_install"] = "{\"action\":\"ota_github\"}";
+        doc["dev_cla"]  = "firmware";
+        doc["avty_t"]   = _t_avail;
+        if (ent_cat && *ent_cat) doc["ent_cat"] = ent_cat;
+        pub_cfg("update", obj, doc);
+    }
+
     // Publish HA MQTT-discovery configs (retained). Called once per connect.
     // Entities are grouped by HA entity_category: primary (no category) for the
     // at-a-glance status + the mow/park/pause/wake buttons; "config" for the
@@ -291,6 +415,12 @@ namespace mqtt {
     // the main card.
     static void pub_discovery() {
         // ── Primary: at-a-glance status ────────────────────────────────────
+        // Fires when we've lost contact (gone DORMANT) while the last known
+        // state was NOT a benign rest — mowing, paused, or an unresolved fault
+        // (e.g. stuck outside the working area). Automate a phone notification
+        // on this turning ON; see README for a sample HA automation.
+        pub_binary("needs_help", "Needs attention",
+            "{{ 'ON' if value_json.needs_help else 'OFF' }}", "problem");
         pub_sensor("battery", "Battery",
             "{{ value_json.battery }}", "%", "battery");
         pub_sensor("state", "Status",
@@ -373,8 +503,17 @@ namespace mqtt {
             "else 'None' }}",
             "{{ {'Low':'collision_low','Medium':'collision_med',"
             "'High':'collision_high'}[value] }}", "config");
+        // Weekly schedule as editable JSON — mirrors exactly what /schedule
+        // publishes (paste the state, tweak times/days, submit) via a SEPARATE
+        // .../schedule/set command topic (see on_schedule_message). HA's text
+        // entity hard-caps at 255 chars, which in this shape fits ~3 tasks —
+        // plenty for the common case (this mower currently uses 1), but a
+        // schedule with many distinct time blocks still needs the web UI editor.
+        pub_text("schedule_edit", "Schedule (JSON)", _t_sched, _t_sched_set,
+            255, "config");
 
         // ── Diagnostics (tucked under the device's Diagnostic section) ──────
+        pub_update("ota_update", "Firmware update", _t_ota, "diagnostic");
         pub_sensor("connection", "Bridge connection",
             "{{ value_json.conn }}", "", "", "diagnostic");
         pub_dur("charge_left", "Charge time remaining", "charge_left", "diagnostic");
@@ -502,9 +641,11 @@ namespace mqtt {
         else if (st.collision_resp == 2) strcpy(cro, "\"High\"");
         else                              strcpy(cro, "null");
 
+        const char* nh = st.needs_help ? "true" : "false";
+
         char buf[1200];
         int n = snprintf(buf, sizeof(buf),
-            "{\"conn\":\"%s\",\"state\":%s,\"activity\":%s,\"battery\":%s,"
+            "{\"conn\":\"%s\",\"needs_help\":%s,\"state\":%s,\"activity\":%s,\"battery\":%s,"
             "\"charging\":%s,\"charge_left\":%s,\"error\":%s,\"error_text\":%s,"
             "\"restriction\":%s,\"next_start\":%s,"
             "\"batt_temp\":%s,\"pitch\":%s,\"roll\":%s,"
@@ -516,7 +657,7 @@ namespace mqtt {
             "\"run_time\":%s,\"cut_time\":%s,\"charge_time\":%s,"
             "\"search_time\":%s,\"collisions\":%s,\"charge_cycles\":%s,"
             "\"blade_time\":%s,\"drive_past\":%s,\"collision_opt\":%s}",
-            conn_str(st.state), ms, ma, mb, mch, mcl, mer, mtx, mrs, mns,
+            conn_str(st.state), nh, ms, ma, mb, mch, mcl, mer, mtx, mrs, mns,
             bt, pa, ra, co, li, pm, fa, fe,
             bv, ls, la, lf, lg,
             gg, lav, lo,
@@ -561,6 +702,22 @@ namespace mqtt {
         esp_mqtt_client_publish(_client, _t_sched, payload, n, 0, true);
     }
 
+    // Blocking HTTPS check of docs/version.txt on GitHub — call from loop()
+    // (the main cooperative task), never from the esp-mqtt event callback.
+    static void publish_ota_status() {
+        char latest[32];
+        bool ok = web_server::check_github_version(latest, sizeof(latest));
+        char payload[192];
+        int n = snprintf(payload, sizeof(payload),
+            "{\"installed_version\":\"%s\",\"latest_version\":\"%s\","
+            "\"release_url\":\"https://github.com/guybw/Husqvarna_to_MQTT\"}",
+            FIRMWARE_VERSION, ok ? latest : FIRMWARE_VERSION);
+        if (n < 0) return;
+        esp_mqtt_client_publish(_client, _t_ota, payload, n, 0, true);
+        if (!ok) debug_log::write(debug_log::WARN, SRC,
+            "GitHub version check failed — reporting up to date until the next try");
+    }
+
     // esp-mqtt event handler. Runs on esp-mqtt's own task.
     static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
                                    int32_t event_id, void* event_data) {
@@ -571,17 +728,28 @@ namespace mqtt {
                 _ever_connected = true;
                 esp_mqtt_client_publish(_client, _t_avail, "online", 0, 0, true);
                 esp_mqtt_client_subscribe(_client, _t_cmd, 0);
+                esp_mqtt_client_subscribe(_client, _t_sched_set, 0);
                 pub_discovery();
+                // Force an OTA version check on the next loop() tick (main task,
+                // not here — publish_ota_status() does a blocking HTTPS fetch and
+                // must never run on the esp-mqtt event task).
+                _ota_check_pending = true;
                 debug_log::write(debug_log::INFO, SRC,
-                    "connected to broker (sub %s)", _t_cmd);
+                    "connected to broker (sub %s, %s)", _t_cmd, _t_sched_set);
                 break;
             case MQTT_EVENT_DISCONNECTED:
                 _connected = false;
                 debug_log::write(debug_log::WARN, SRC, "broker disconnected");
                 break;
             case MQTT_EVENT_DATA:
-                // Inbound command. Topic is always _t_cmd (our only sub).
-                on_message((const uint8_t*)e->data, (unsigned int)e->data_len);
+                // Two subscriptions: _t_cmd (short action commands) and
+                // _t_sched_set (the schedule text entity's JSON blob).
+                if ((int)e->topic_len == (int)strlen(_t_sched_set) &&
+                    memcmp(e->topic, _t_sched_set, e->topic_len) == 0) {
+                    on_schedule_message((const uint8_t*)e->data, (unsigned int)e->data_len);
+                } else {
+                    on_message((const uint8_t*)e->data, (unsigned int)e->data_len);
+                }
                 break;
             case MQTT_EVENT_ERROR:
                 debug_log::write(debug_log::WARN, SRC, "mqtt transport error");
@@ -614,6 +782,8 @@ namespace mqtt {
         snprintf(_t_avail, sizeof(_t_avail), "%s/availability", _base);
         snprintf(_t_cmd,   sizeof(_t_cmd),   "%s/cmd", _base);
         snprintf(_t_sched, sizeof(_t_sched), "%s/schedule", _base);
+        snprintf(_t_sched_set, sizeof(_t_sched_set), "%s/schedule/set", _base);
+        snprintf(_t_ota,   sizeof(_t_ota),   "%s/ota", _base);
 
         uint16_t port = settings::get_mqtt_port();
         _user = settings::get_mqtt_user();
@@ -682,6 +852,14 @@ namespace mqtt {
             _last_pub = now;
             publish_state();
             publish_schedule();
+        }
+        // Infrequent (every OTA_CHECK_MS, plus once soon after (re)connect via
+        // _ota_check_pending) blocking HTTPS check; fine to run inline here
+        // since this is the main cooperative task, not the mqtt task.
+        if (_ota_check_pending || now - _last_ota_check >= OTA_CHECK_MS) {
+            _ota_check_pending = false;
+            _last_ota_check = now;
+            publish_ota_status();
         }
     }
 }

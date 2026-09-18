@@ -5,4 +5,5 @@ idf_component_register(
     SRCS "web_server.cpp"
     INCLUDE_DIRS "include"
     REQUIRES core net ble esp_http_server app_update esp_wifi esp_netif esp_timer mbedtls
+             esp_https_ota esp_http_client
 )
