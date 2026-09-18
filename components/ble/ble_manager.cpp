@@ -2166,9 +2166,10 @@ namespace ble_manager {
         if (!a) return;
         a->count = count;
         for (uint32_t i = 0; i < count; i++) a->tasks[i] = tasks[i];
-        // Matches conn_task's own stack size (6144) — write_schedule_wake calls
-        // the same BLE query/write machinery conn_task_fn runs with.
-        xTaskCreate(schedule_write_task, "sched_wr", 6144, a, 5, nullptr);
+        // Matches conn_task's own stack size (6144) and priority (1) —
+        // write_schedule_wake calls the same BLE query/write machinery
+        // conn_task_fn runs with, and shouldn't outrank it either.
+        xTaskCreate(schedule_write_task, "sched_wr", 6144, a, 1, nullptr);
     }
 
     bool get_schedule_cache(ScheduleTask* out, uint32_t max_out, uint32_t* out_count) {

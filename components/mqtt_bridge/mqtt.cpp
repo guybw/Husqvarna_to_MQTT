@@ -15,6 +15,8 @@
 #include "web_server.h"
 #include "mqtt_client.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <ArduinoJson.h>
 #include <cstring>
 #include <cstdio>
@@ -37,6 +39,7 @@ namespace mqtt {
     static uint32_t _last_pub   = 0;
     static uint32_t _last_ota_check = 0;
     static bool     _ota_check_pending = true;  // fire once soon after (re)connect
+    static bool     _ota_check_in_flight = false;
     static bool     _configured = false;
     static bool     _connected  = false;
     static bool     _ever_connected = false;  // we've reached the broker at least once
@@ -54,8 +57,10 @@ namespace mqtt {
     // before forcing it. Covers the normal reconnect; only a wedged client (dead
     // half-open socket, or a new DHCP IP after a router reboot) needs the nudge.
     static constexpr uint32_t MQTT_WIFI_REGAIN_GRACE_MS = 15000;
-    // How often to re-check GitHub for a newer firmware version. Infrequent —
-    // it's a blocking HTTPS request run inline in loop() (fine at this cadence).
+    // How often to re-check GitHub for a newer firmware version. Runs on its
+    // own task (see ota_check_task) — a blocking HTTPS/TLS request must never
+    // run on the shared main loop (reset_button/status_led/etc. all live
+    // there) or on the esp-mqtt event task.
     static constexpr uint32_t OTA_CHECK_MS = 6UL * 60UL * 60UL * 1000UL; // 6 h
 
     static uint32_t now_ms() { return (uint32_t)(esp_timer_get_time() / 1000); }
@@ -702,8 +707,9 @@ namespace mqtt {
         esp_mqtt_client_publish(_client, _t_sched, payload, n, 0, true);
     }
 
-    // Blocking HTTPS check of docs/version.txt on GitHub — call from loop()
-    // (the main cooperative task), never from the esp-mqtt event callback.
+    // Blocking HTTPS check of docs/version.txt on GitHub. Only ever called from
+    // ota_check_task's own spawned task — see the comment on OTA_CHECK_MS for
+    // why this must never run on the shared main loop or the esp-mqtt task.
     static void publish_ota_status() {
         char latest[32];
         bool ok = web_server::check_github_version(latest, sizeof(latest));
@@ -716,6 +722,12 @@ namespace mqtt {
         esp_mqtt_client_publish(_client, _t_ota, payload, n, 0, true);
         if (!ok) debug_log::write(debug_log::WARN, SRC,
             "GitHub version check failed — reporting up to date until the next try");
+    }
+
+    static void ota_check_task(void*) {
+        publish_ota_status();
+        _ota_check_in_flight = false;
+        vTaskDelete(nullptr);
     }
 
     // esp-mqtt event handler. Runs on esp-mqtt's own task.
@@ -854,12 +866,18 @@ namespace mqtt {
             publish_schedule();
         }
         // Infrequent (every OTA_CHECK_MS, plus once soon after (re)connect via
-        // _ota_check_pending) blocking HTTPS check; fine to run inline here
-        // since this is the main cooperative task, not the mqtt task.
-        if (_ota_check_pending || now - _last_ota_check >= OTA_CHECK_MS) {
+        // _ota_check_pending) HTTPS check. MUST run off the main loop task —
+        // an earlier version called publish_ota_status() inline here and the
+        // TLS handshake's real CPU cost froze reset_button/status_led/etc. for
+        // the whole request, badly enough to starve MQTT's own keepalive and
+        // trigger a reconnect -> re-check -> freeze -> reconnect loop on
+        // hardware. _ota_check_in_flight stops a second one overlapping.
+        if (!_ota_check_in_flight &&
+            (_ota_check_pending || now - _last_ota_check >= OTA_CHECK_MS)) {
             _ota_check_pending = false;
             _last_ota_check = now;
-            publish_ota_status();
+            _ota_check_in_flight = true;
+            xTaskCreate(ota_check_task, "ota_check", 8192, nullptr, 1, nullptr);
         }
     }
 }

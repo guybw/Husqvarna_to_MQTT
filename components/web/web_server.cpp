@@ -904,8 +904,10 @@ namespace web_server {
 
     void start_github_ota_async() {
         // TLS handshake + esp_https_ota's own buffers are stack-hungry; 8 KB
-        // matches ESP-IDF's own https_ota examples' task stack sizing.
-        xTaskCreate(github_ota_task, "gh_ota", 8192, nullptr, 5, nullptr);
+        // matches ESP-IDF's own https_ota examples' task stack sizing. Priority
+        // 1, same as ble_conn (conn_task_fn) — background work must not outrank
+        // the app's own main loop / BLE task.
+        xTaskCreate(github_ota_task, "gh_ota", 8192, nullptr, 1, nullptr);
     }
 
     static esp_err_t h_ota_check_get(httpd_req_t* req) {
