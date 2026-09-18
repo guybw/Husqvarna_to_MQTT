@@ -829,19 +829,32 @@ namespace web_server {
         if (out_status) *out_status = 0;
         if (!out || out_len == 0) return false;
         out[0] = '\0';
-        esp_http_client_config_t cfg = {};
-        cfg.url               = GITHUB_VERSION_URL;
-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
-        cfg.timeout_ms        = 8000;
-        esp_http_client_handle_t client = esp_http_client_init(&cfg);
-        if (!client) return false;
-        esp_err_t err = esp_http_client_open(client, 0);
-        if (err != ESP_OK) {
+
+        // One retry on a connect-level failure (DNS/TCP/TLS — ESP_ERR_HTTP_CONNECT
+        // et al). Confirmed on hardware (2026-09-18): this network has brief,
+        // transient blips reaching raw.githubusercontent.com that clear within a
+        // couple of seconds — a following check from elsewhere on the same
+        // network succeeds immediately. Don't surface a failure for one blip.
+        esp_http_client_handle_t client = nullptr;
+        esp_err_t err = ESP_FAIL;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            esp_http_client_config_t cfg = {};
+            cfg.url               = GITHUB_VERSION_URL;
+            cfg.crt_bundle_attach = esp_crt_bundle_attach;
+            cfg.timeout_ms        = 8000;
+            client = esp_http_client_init(&cfg);
+            if (!client) return false;
+            err = esp_http_client_open(client, 0);
+            if (err == ESP_OK) break;
             debug_log::write(debug_log::WARN, SRC,
-                "GitHub version check: connect failed (%s)", esp_err_to_name(err));
+                "GitHub version check: connect failed (%s)%s", esp_err_to_name(err),
+                attempt == 0 ? " — retrying once" : "");
             esp_http_client_cleanup(client);
-            return false;
+            client = nullptr;
+            if (attempt == 0) vTaskDelay(pdMS_TO_TICKS(2000));
         }
+        if (err != ESP_OK || !client) return false;
+
         esp_http_client_fetch_headers(client);
         int status = esp_http_client_get_status_code(client);
         if (out_status) *out_status = status;
