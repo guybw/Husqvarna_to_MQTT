@@ -2201,7 +2201,16 @@ namespace ble_manager {
         // Matches conn_task's own stack size (6144) and priority (1) —
         // write_schedule_wake calls the same BLE query/write machinery
         // conn_task_fn runs with, and shouldn't outrank it either.
-        xTaskCreate(schedule_write_task, "sched_wr", 6144, a, 1, nullptr);
+        // MUST check the return: confirmed on hardware (2026-09-18) that
+        // xTaskCreate can fail here from heap fragmentation even with plenty
+        // of total free heap. An unchecked failure silently drops the edit
+        // AND leaks `a` (never freed, since schedule_write_task never runs).
+        BaseType_t ok = xTaskCreate(schedule_write_task, "sched_wr", 6144, a, 1, nullptr);
+        if (ok != pdPASS) {
+            debug_log::write(debug_log::ERROR, SRC,
+                "schedule write: xTaskCreate failed (heap too fragmented?) — dropped");
+            free(a);
+        }
     }
 
     bool get_schedule_cache(ScheduleTask* out, uint32_t max_out, uint32_t* out_count) {

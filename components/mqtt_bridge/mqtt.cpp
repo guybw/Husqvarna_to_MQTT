@@ -156,7 +156,9 @@ namespace mqtt {
             // doesn't go through queue_command; starts the async GitHub OTA
             // (esp_https_ota) directly, same as the web UI's button.
             debug_log::write(debug_log::INFO, SRC, "GitHub OTA triggered via MQTT");
-            web_server::start_github_ota_async();
+            if (!web_server::start_github_ota_async())
+                debug_log::write(debug_log::ERROR, SRC,
+                    "GitHub OTA: failed to start (see web log) — try again");
         } else if (strcmp(cmd, "sched_start") == 0) {
             unsigned hh = 0, mm = 0;
             if (sscanf(sched_field, "%u:%u", &hh, &mm) == 2 && hh < 24 && mm < 60) {
@@ -1014,7 +1016,15 @@ namespace mqtt {
             _ota_check_pending = false;
             _last_ota_check = now;
             _ota_check_in_flight = true;
-            xTaskCreate(ota_check_task, "ota_check", 8192, nullptr, 1, nullptr);
+            // MUST check the return: an unchecked failure here (confirmed
+            // possible on hardware from heap fragmentation, 2026-09-18) would
+            // leave _ota_check_in_flight stuck true forever, silently
+            // disabling every future check with nothing logged.
+            if (xTaskCreate(ota_check_task, "ota_check", 8192, nullptr, 1, nullptr) != pdPASS) {
+                _ota_check_in_flight = false;
+                debug_log::write(debug_log::ERROR, SRC,
+                    "OTA check: xTaskCreate failed (heap too fragmented?) — will retry next tick");
+            }
         }
         // Simple schedule editor: flush a debounced edit (time/duration/day
         // switch) as one write, SCHEDULE_EDIT_DEBOUNCE_MS after the last field

@@ -26,8 +26,10 @@ namespace web_server {
 
     // Kicks off the fetch-flash-reboot of docs/firmware.bin from GitHub on a
     // dedicated one-shot task; returns immediately. Suspends BLE like the
-    // manual upload path — one-way, the device reboots on success. On failure
-    // it logs and leaves BLE suspended (same tradeoff as a failed manual OTA
-    // upload today), no reboot.
-    void start_github_ota_async();
+    // manual upload path — one-way, the device reboots on success. On a
+    // download/flash failure it logs and leaves BLE suspended (same tradeoff
+    // as a failed manual OTA upload today), no reboot. Returns false (logged)
+    // if the task itself couldn't even be spawned (e.g. heap fragmentation) —
+    // in that case nothing started at all, BLE is untouched.
+    bool start_github_ota_async();
 }

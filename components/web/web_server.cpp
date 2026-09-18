@@ -902,12 +902,23 @@ namespace web_server {
         vTaskDelete(nullptr);
     }
 
-    void start_github_ota_async() {
+    bool start_github_ota_async() {
         // TLS handshake + esp_https_ota's own buffers are stack-hungry; 8 KB
         // matches ESP-IDF's own https_ota examples' task stack sizing. Priority
         // 1, same as ble_conn (conn_task_fn) — background work must not outrank
         // the app's own main loop / BLE task.
-        xTaskCreate(github_ota_task, "gh_ota", 8192, nullptr, 1, nullptr);
+        //
+        // MUST check the return value: confirmed on hardware (2026-09-18) that
+        // xTaskCreate can fail here even with tens of KB of *total* free heap,
+        // if it's fragmented enough that no single 8 KB block is free. An
+        // unchecked failure here silently does nothing — perform_github_ota()
+        // (and its ble_manager::suspend()) never runs, but the caller has
+        // already told the user "update started".
+        BaseType_t ok = xTaskCreate(github_ota_task, "gh_ota", 8192, nullptr, 1, nullptr);
+        if (ok != pdPASS)
+            debug_log::write(debug_log::ERROR, SRC,
+                "GitHub OTA: xTaskCreate failed (heap too fragmented?) — not started");
+        return ok == pdPASS;
     }
 
     static esp_err_t h_ota_check_get(httpd_req_t* req) {
@@ -938,7 +949,9 @@ namespace web_server {
     static esp_err_t h_ota_github_post(httpd_req_t* req) {
         if (!guard(req)) return ESP_OK;
         debug_log::write(debug_log::INFO, SRC, "GitHub OTA triggered from web UI");
-        start_github_ota_async();
+        if (!start_github_ota_async())
+            return send_json(req, "503 Service Unavailable",
+                "{\"error\":\"could not start (see debug log) — try again\"}");
         return send_ok(req, "{\"ok\":true,\"msg\":\"update started\"}");
     }
 
